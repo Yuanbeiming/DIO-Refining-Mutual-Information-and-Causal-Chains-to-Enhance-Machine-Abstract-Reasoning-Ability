@@ -736,13 +736,13 @@ class raven_clip(nn.Module):
     
     def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
         
-        # Gumbel 噪声
+       
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
         
-        # Gumbel-Softmax 对数概率
+ 
         log_probs = F.log_softmax((logits + gumbel_noise) / temperature, dim=1)
         
-        # NLLLoss
+ 
         return F.nll_loss(log_probs, target, reduction= reduction)
 
     def dio_loss(self, logits, target, delta= 1e-5, gumbeling = True):
@@ -755,8 +755,7 @@ class raven_clip(nn.Module):
             ce = F.cross_entropy(logits, target, reduction='none') 
             p = F.softmax(logits, dim=-1)
     
-        # 2. 取 P_a
-        #p = F.softmax(logits, dim=-1)            # (B, 8)
+       
         
         if delta<1:
             p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
@@ -771,30 +770,22 @@ class raven_clip(nn.Module):
 
 
     def freeze_all_except_brando(self):
-        """
-        关闭全部参数的梯度，只打开 Brando 的梯度。
-        适用于仅训练 Brando 辅助候选生成模块的场景。
-        """
-        # 先关闭所有参数的梯度
+        
         for param in self.parameters():
             param.requires_grad = False
         
-        # 单独打开 Brando 模块的梯度
+       
         if hasattr(self, 'Brando'):
             for param in self.Brando.parameters():
                 param.requires_grad = True
     
     
     def freeze_brando_only(self):
-        """
-        打开全部参数的梯度，只关闭 Brando 的梯度。
-        适用于固定 Brando 模块，仅训练主干网络（DIO 部分）的场景。
-        """
-        # 先打开所有参数的梯度
+       
         for param in self.parameters():
             param.requires_grad = True
         
-        # 单独关闭 Brando 模块的梯度
+       
         if hasattr(self, 'Brando'):
             for param in self.Brando.parameters():
                 param.requires_grad = False   
@@ -823,7 +814,6 @@ def reasoning(*args):
 
  
 if __name__ == '__main__':
-    #from torchsummary import summary
     
     num_item = 1
     x = torch.randn(num_item,16,80,80)
@@ -831,34 +821,18 @@ if __name__ == '__main__':
     target = torch.randint(7776,(num_item,)).long()
     label = torch.randint(8,(num_item,)).long()
     
-    
     model = raven_clip()
     
     model.eval()
-    # params = torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu')
-    # # model_dict =  model.state_dict()
-    
-    # # state_dict = {k:v for k,v in params.items() if k in model_dict.keys()}
-    # for k,q in model.named_parameters():
-    #     if k[:7] != 'tajador':
-    #         print(k)
-    #         q.data = params[k].data
-            
-
-    # 
-    # model_dict.update(state_dict)
-    # model.load_state_dict(model_dict)       
-    # model.load_state_dict(torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu'))
     out = model(x)
     
-    # l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)
-    # l.backward()
+    l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)
+    l.backward()
 
-    # print(model)
+    print(model)
+
     from torchinfo import summary
-    #model = raven_clip().to('cuda' if torch.cuda.is_available() else 'cpu')
-    #summary(model, (16, 80, 80), device='cpu')
-    summary(model, input_size=(1,16, 80, 80),
+    summary(model, input_size=(1, 16, 80, 80),
         col_names=["input_size", "output_size", "num_params", 
                     "kernel_size", "mult_adds", "trainable"], device='cpu')
     #accuracy = model.choose_accuracy(*out, idx = label)
@@ -867,15 +841,22 @@ if __name__ == '__main__':
 
     stmt = "model(input_tensor)"
     setup = "model.eval(); torch.cuda.synchronize()"
+    model = raven_clip(num_aux_candidates = 0)
+    device = torch.device("cuda")
+    #device = torch.device("cpu")
 
     timer = Timer(
         stmt=stmt,
         setup=setup,
-        globals={"model": model.cuda(), "input_tensor": x.cuda()},
+        globals={"model": model.to(device), "input_tensor": x.to(device)},
         num_threads=4,
         label="Latency",
         sub_label="batch=1"
     )
+
+    result = timer.blocked_autorange(min_run_time=10)  # 至少跑10秒
+    print(f"{result.median*1000:.3f} ms ± {result.iqr*1000:.3f} ms")
+
 
     result = timer.blocked_autorange(min_run_time=10)  # 至少跑10秒
     print(f"{result.median*1000:.3f} ms ± {result.iqr*1000:.3f} ms")

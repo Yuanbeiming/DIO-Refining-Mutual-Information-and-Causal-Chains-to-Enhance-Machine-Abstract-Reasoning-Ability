@@ -552,7 +552,7 @@ class raven_clip(nn.Module):
                 else:
                     print(f"Warning: Buffer '{name}' not found in pretrained dict.")
 
-        add_spectral_norm(self)
+        self._add_spectral_norm()
         
         
         print('num_aux_candidates:', num_aux_candidates)
@@ -561,8 +561,25 @@ class raven_clip(nn.Module):
         else:
             print('*'*100)
             print('Worning! embed is fixed')
+            
 
-                
+    def _add_spectral_norm(self):
+        
+        exclude_names = {'vit', 'decoder_up', 'decoder_down'}
+        
+        for name, module in self.named_modules():
+            # 跳过模型本身（name为空）和排除模块及其子模块
+            if not name:
+                continue
+            
+            # 检查路径中是否包含排除的模块名（如 vit.transformer 会被排除）
+            if any(excluded in name.split('.') for excluded in exclude_names):
+                continue
+            
+            # 只为 Linear 和 Conv2d 添加谱归一化
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                spectral_norm(module)
+                print(f'add sn to: {name}')           
 
     def sample_from_codebook(self, b):
         

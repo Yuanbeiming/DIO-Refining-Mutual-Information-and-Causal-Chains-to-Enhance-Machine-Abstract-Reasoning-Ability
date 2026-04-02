@@ -257,13 +257,7 @@ class To_image(nn.Module):
 
         return x
 
-def add_spectral_norm(module):
-         for name, layer in module.named_children():
-                if isinstance(layer, (nn.Linear, nn.Conv2d)) and name[:3]!='vit' and name[:6]!='decode' and name[:5]!= 'embed':
-                    spectral_norm(layer)
-                    print('add sn to: ' + name)
-                else:
-                    add_spectral_norm(layer)
+
 
 class raven_clip(nn.Module):
     def __init__(self, *args, num_aux_candidates = 16):

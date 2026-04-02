@@ -615,7 +615,6 @@ def reasoning(*args):
 
  
 if __name__ == '__main__':
-    #from torchsummary import summary
     
     num_item = 1
     x = torch.randn(num_item,16,80,80)
@@ -626,10 +625,15 @@ if __name__ == '__main__':
     model = raven_clip()
     
     model.eval()
+    out = model(x)
+    
+    l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)
+    l.backward()
+
+    print(model)
+
     from torchinfo import summary
-    #model = raven_clip().to('cuda' if torch.cuda.is_available() else 'cpu')
-    #summary(model, (16, 80, 80), device='cpu')
-    summary(model, input_size=(1,16, 80, 80),
+    summary(model, input_size=(1, 16, 80, 80),
         col_names=["input_size", "output_size", "num_params", 
                     "kernel_size", "mult_adds", "trainable"], device='cpu')
     #accuracy = model.choose_accuracy(*out, idx = label)
@@ -638,7 +642,7 @@ if __name__ == '__main__':
 
     stmt = "model(input_tensor)"
     setup = "model.eval(); torch.cuda.synchronize()"
-    
+    model = raven_clip(num_aux_candidates = 0)
     device = torch.device("cuda")
     #device = torch.device("cpu")
 
@@ -650,6 +654,9 @@ if __name__ == '__main__':
         label="Latency",
         sub_label="batch=1"
     )
+
+    result = timer.blocked_autorange(min_run_time=10)  # 至少跑10秒
+    print(f"{result.median*1000:.3f} ms ± {result.iqr*1000:.3f} ms")
 
     result = timer.blocked_autorange(min_run_time=10)  # 至少跑10秒
     print(f"{result.median*1000:.3f} ms ± {result.iqr*1000:.3f} ms")

@@ -49,38 +49,7 @@ class Sigmoid_down(nn.Module):
         
         return torch.sigmoid(x) /2
 
-class Beta(nn.Module):
-    def __init__(self, alpha = 10, step_size = 0.01):
-        super(Beta, self).__init__()
 
-        self.register_buffer("beta",torch.ones(1))
-        
-        self.alpha = alpha
-        
-        self.step_size = step_size
-        
-        self.register_buffer("action",torch.zeros(1))
-        
-        step_beta = self.alpha/step_size
-        
-        self.step_beta = math.pi/step_beta
-        
-    def forward(self):
-        
-        
-        return self.beta.item()
-        
-
-
-    def step(self):
-        
-        self.beta += ((torch.sin(self.action) >= 0 ).long()*2 - 1)*self.step_size
-        # print((torch.sin(self.action) >= 0 ).long())
-        self.action += self.step_beta
-        """
-        if self.beta.item() < self.alpha:
-            self.beta += self.step_size
-        """
 class Recat(nn.Module):
     def __init__(self, num_aux_candidates=8):
         super(Recat, self).__init__()

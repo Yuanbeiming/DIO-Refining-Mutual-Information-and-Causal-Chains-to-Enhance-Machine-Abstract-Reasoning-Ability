@@ -470,35 +470,7 @@ class raven_clip(nn.Module):
 			                                        1,
 			                                        vq_loss_type = 'mse')
 
-        self.pretrain = True
-
-        
-        
-        if self.pretrain:
-            
-            pretrained_params = torch.load('./model_DIO_WORLD_embdv_null_heads_null_1200000_neutral_best_pretrain_9913.pt', map_location = 'cpu')
-
-            
-            for name, param in self.named_parameters():
-                if name in pretrained_params:
-                   
-                         param.data = pretrained_params[name].data
-
-                         # print(f"Parameter '{name}' is loading.")  
-
-                    
-                else:
-                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
-                    
-                    
-            for name, buffer in self.named_buffers():
-                if name in pretrained_params: 
-                                   
-	                    buffer.data.copy_(pretrained_params[name].data)
-# 	                    print(f"Buffer '{name}' is loading.")
-	             
-                else:
-                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
+    
 
         self._add_spectral_norm()
         

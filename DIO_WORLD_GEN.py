@@ -856,8 +856,7 @@ def reasoning(*args):
 
  
 if __name__ == '__main__':
-    #from torchsummary import summary
-    from torchinfo import summary
+    
     num_item = 1
     x = torch.randn(num_item,16,80,80)
     y = torch.randint(1,(num_item,7776,16)).long()
@@ -867,20 +866,6 @@ if __name__ == '__main__':
     model = raven_clip()
     
     model.eval()
-    # params = torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu')
-    # # model_dict =  model.state_dict()
-    
-    # # state_dict = {k:v for k,v in params.items() if k in model_dict.keys()}
-    # for k,q in model.named_parameters():
-    #     if k[:7] != 'tajador':
-    #         print(k)
-    #         q.data = params[k].data
-            
-
-    # 
-    # model_dict.update(state_dict)
-    # model.load_state_dict(model_dict)       
-    # model.load_state_dict(torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu'))
     out = model(x)
     
     l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)
@@ -888,8 +873,7 @@ if __name__ == '__main__':
 
     print(model)
 
-    #model = raven_clip().to('cuda' if torch.cuda.is_available() else 'cpu')
-    #summary(model, (16, 80, 80), device='cpu')
+    from torchinfo import summary
     summary(model, input_size=(1, 16, 80, 80),
         col_names=["input_size", "output_size", "num_params", 
                     "kernel_size", "mult_adds", "trainable"], device='cpu')

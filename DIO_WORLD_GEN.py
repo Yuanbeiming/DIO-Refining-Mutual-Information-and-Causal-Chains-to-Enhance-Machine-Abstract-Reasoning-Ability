@@ -467,7 +467,7 @@ class raven_clip(nn.Module):
 			                                        self.low_dim,
 			                                        vql_heads,
 			                                        self.beta,
-			                                        1,
+			                                        0.99,
 			                                        vq_loss_type = 'mse')
 
     

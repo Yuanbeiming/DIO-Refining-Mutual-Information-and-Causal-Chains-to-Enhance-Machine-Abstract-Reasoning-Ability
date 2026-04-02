@@ -274,13 +274,6 @@ class Cross_Transformer(nn.Module):
 
         
 
-def add_spectral_norm(module):
-         for name, layer in module.named_children():
-                if isinstance(layer, (nn.Linear, nn.Conv2d)) and name[:3]!='vit' and name[:6]!='decode' and name[:5]!= 'embed':
-                    spectral_norm(layer)
-                    print('add sn to: ' + name)
-                else:
-                    add_spectral_norm(layer)
 
 class raven_clip(nn.Module):
     def __init__(self, *args, num_aux_candidates = 16):
@@ -393,10 +386,7 @@ class raven_clip(nn.Module):
         Rearrange('b m n s d -> b s m (n d)', s = self.w, n = 3, m = m),
         
 
-        )#b*16, 16, dimS
-        
-        #self.discrimnator = SinkhornDistance(eps=0.1, max_iter = 100, reduction='mean')
-
+        )
         
         self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
                                       # Mean(dim = -2, keepdim = True),
@@ -503,18 +493,7 @@ class raven_clip(nn.Module):
                             Mean(dim = -1))
 
         self.num_forward = 0
-        """
-        self.txt_clip = nn.Sequential(Rearrange('b n s -> (b n) s', s = 10, n = txt_size),
-                            txt_mask_transformer(dict_size = 14, words = 10, dim = self.low_dim, depth = num_depth*2, 
-                                                 heads = num_head, dim_head = int(self.low_dim/num_head), mlp_dim = self.low_dim*2, dropout = 0.1,is_pgm = True, num_cls=1),
-                            take_cls(),
-                            Rearrange('(b n) d -> b n d', n = txt_size)) #b,336,d
-        """
-        """
-        self.vql = VectorQuantizerEMA(self.num_embeddings,
-                                        self.low_dim,
-                                        self.beta)
-        """
+       
         self.vql = VectorQuantizerEMA_multi_head_revival(self.num_embeddings,
 			                                        self.low_dim,
 			                                        vql_heads,

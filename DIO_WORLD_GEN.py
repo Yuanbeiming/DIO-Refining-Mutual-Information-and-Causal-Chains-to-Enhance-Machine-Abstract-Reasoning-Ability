@@ -500,8 +500,6 @@ class raven_clip(nn.Module):
         
 
     def _add_spectral_norm(self):
-        """为除 vit、decoder_up、decoder_down 及其子模块外的所有 Linear/Conv2d 添加谱归一化"""
-        
         
         exclude_names = {'vit', 'decoder_up', 'decoder_down'}
         
@@ -678,45 +676,6 @@ class raven_clip(nn.Module):
 
         return self.dio_loss(x, idx), (x.argmax(dim = -1) == idx).float().sum() if self.training else (x[:, :8].argmax(dim = -1) == idx).float().sum()
         
-        
-        #return self.dio_loss(x, idx)F.cross_entropy(x/1,idx)
-
-    
-    
-    def loss_function_sl(self, *out, target):
-        
-
-
-        
-        keep_rule = (target != 7775)
-        
-        graph = out[0]# b 5 d
-        # print(graph.shape)
-
-        txt = out[1]# b t 7775 d
-        # print(txt.shape)
-
-        
-        loss_1 = 0
-    
-        right = torch.zeros(1).sum().to(graph.device)
-        
-        if keep_rule.float().sum().item() != 0:
-            
-
-            r = F.cosine_similarity(graph[keep_rule,:,None, None], txt[:,None,:], dim = -1).mean(dim = -2) #b 5, t, 7775
-            
-            # print(r.shape)
-            
-            loss_1 += F.cross_entropy(r.reshape(-1, 7775)/ self.temperature, target[keep_rule, None].expand(-1, r.shape[1]).reshape(-1))
-
-            right = (r.argmax(dim = -1).reshape(-1) == target[keep_rule, None].expand(-1, 9).reshape(-1)).float().sum()/9
-
-            """"""
-
-        
-        return loss_1, right
-    
     
     
     def loss_function(self, *out, target_shape, target_line, idx):
@@ -769,8 +728,6 @@ class raven_clip(nn.Module):
 
        
         return 100*(loss + 10*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 3*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
-
-        #return 50*(loss + loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 10*torch.relu(vq_loss - 0.1) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
 
 
         
@@ -830,24 +787,11 @@ class raven_clip(nn.Module):
 
 
     def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
-        """
-        Gumbel-Softmax + NLLLoss
-        
-        Args:
-            logits: [B, C] 原始 logits
-            target: [B] 类别索引
-            temperature: Gumbel 温度
-        
-        Returns:
-            loss: 标量
-        """
-        # Gumbel 噪声
+       
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
-        
-        # Gumbel-Softmax 对数概率
+ 
         log_probs = F.log_softmax((logits + gumbel_noise) / temperature, dim=1)
         
-        # NLLLoss
         return F.nll_loss(log_probs, target, reduction= reduction)
 
 
@@ -856,7 +800,6 @@ class raven_clip(nn.Module):
 
     def dio_loss(self, logits, target, delta= 1e-5, gumbeling = False ):
        
-        
         if gumbeling:
             ce = self.gumbel_nll_loss(logits, target, reduction='none') 
             p = F.gumbel_softmax(logits, dim=-1)
@@ -864,13 +807,10 @@ class raven_clip(nn.Module):
         else:
             ce = F.cross_entropy(logits, target, reduction='none') 
             p = F.softmax(logits, dim=-1)
-    
-     
         
         if delta<1:
             p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
-        
-            # 3. 修正项
+    
             corr = torch.log((1 - p_alpha + delta * p_alpha) / delta)
             
         else:

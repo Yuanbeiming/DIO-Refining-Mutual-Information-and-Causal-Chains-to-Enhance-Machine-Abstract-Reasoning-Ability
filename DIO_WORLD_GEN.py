@@ -60,15 +60,15 @@ class Recat(nn.Module):
       
         
         indices = []
-        # 1. 基础 3x3 矩阵 (0-8)
+
         indices += [0,1,2,3,4,5,6,7,8]
         
 
-        base_idx = 9  # 候选起始索引
+        base_idx = 9  
         for i in range(self.num_candidates-1):
             indices += [6, 7, base_idx + i]
             
-        # 3. 列方向基础: [0,3,6], [1,4,7], [2,5,8]
+
         indices += [0,3,6,1,4,7,2,5,8]
         
 
@@ -242,10 +242,25 @@ class Cross_Transformer(nn.Module):
         return x
 
         
+class To_image(nn.Module):
+    def __init__(self, c, h ,w):
+        super().__init__()
+        
+        self.linear = nn.Linear(c*h*w, c*h*w)
+        
+    def forward(self, x):
+        
+        b, c, h, w = x.shape
+        
+        x = x + self.linear(x.reshape(b, -1)).reshape(b, c, h, w)
+
+
+        return x
+
 
 
 class raven_clip(nn.Module):
-    def __init__(self, *args, num_aux_candidates = 16):
+    def __init__(self, *args, num_aux_candidates =  4):
         super(raven_clip,self).__init__()
 
         #self.num_embeddings = 8192
@@ -321,7 +336,7 @@ class raven_clip(nn.Module):
 
         self.w = int(size/patch)*int(size/patch)
         
-        self.num_aux_candidates = num_aux_candidates# =  4 #int((16**vql_heads)/self.w)
+        self.num_aux_candidates = num_aux_candidates #int((16**vql_heads)/self.w)
 
 
         
@@ -336,7 +351,7 @@ class raven_clip(nn.Module):
         
         self.num_rule = 2
 
-        num_decoder_depth = num_depth*2 + 2
+        
             
         self.vit = nn.Sequential(ViT(image_size = size, 
                                    patch_size = patch,  
@@ -345,7 +360,7 @@ class raven_clip(nn.Module):
                                    heads = num_head, 
                                    mlp_dim = self.low_dim*2,
                                    channels = 1, 
-                                   dim_head = int(self.low_dim*2/num_head), 
+                                   dim_head = int(self.low_dim*2/(num_head)), 
                                    dropout = _dropout, 
                                    emb_dropout = _dropout),
     
@@ -355,7 +370,11 @@ class raven_clip(nn.Module):
         Rearrange('b m n s d -> b s m (n d)', s = self.w, n = 3, m = m),
         
 
-        )
+        )#b*16, 16, dimS
+        
+        #self.discrimnator = SinkhornDistance(eps=0.1, max_iter = 100, reduction='mean')
+
+        num_decoder_depth = num_depth*2 + 2
         
         self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
                                       # Mean(dim = -2, keepdim = True),
@@ -461,29 +480,28 @@ class raven_clip(nn.Module):
                             Rearrange('(b m s n) d -> b m (s n d)', s = self.w, m = num_candidates, n = 1),
                             Mean(dim = -1))
 
-        self.num_forward = 0
-       
+        
         self.vql = VectorQuantizerEMA_multi_head_revival(self.num_embeddings,
 			                                        self.low_dim,
 			                                        vql_heads,
 			                                        self.beta,
-			                                        0.99,
+			                                        0.9998,
 			                                        vq_loss_type = 'mse')
-
-    
-
         self._add_spectral_norm()
-        
-        
-        print('num_aux_candidates:', num_aux_candidates)
+        self.pretrain = True
+
+                
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
         else:
             print('*'*100)
             print('Worning! embed is fixed')
-            
+        print('num_aux_candidates:', num_aux_candidates)
+        
 
     def _add_spectral_norm(self):
+        """为除 vit、decoder_up、decoder_down 及其子模块外的所有 Linear/Conv2d 添加谱归一化"""
+        
         
         exclude_names = {'vit', 'decoder_up', 'decoder_down'}
         
@@ -499,7 +517,7 @@ class raven_clip(nn.Module):
             # 只为 Linear 和 Conv2d 添加谱归一化
             if isinstance(module, (nn.Linear, nn.Conv2d)):
                 spectral_norm(module)
-                print(f'add sn to: {name}')           
+                print(f'add sn to: {name}')
 
     def sample_from_codebook(self, b):
         
@@ -509,31 +527,32 @@ class raven_clip(nn.Module):
             k = self.num_aux_candidates  # 采样数K
             w = self.w  # patch数量(16)
             
-            
+          
             rand_idx = torch.randint(
                 0, N, 
                 (b, k, w, H), 
                 device=embed.device
             )
             
-           
+            
             embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
             
-            
+          
             head_offsets = torch.arange(H, device=embed.device).view(1, 1, 1, H) * N
             global_idx = rand_idx + head_offsets  # [b, k, w, H]
             
-            
+           
             samples = F.embedding(global_idx, embed_flat)
             
-            
+           
             samples = samples.reshape(b, k, w, H * D)
             
-        return samples.detach() 
+        return samples.detach()  # [b, k, w, low_dim]
        
     
     def forward_cross_attention(self,qkv):
         
+       # print(q_1.shape)
        
        q, kv = qkv.split([1,8], dim = 3)
        
@@ -560,23 +579,27 @@ class raven_clip(nn.Module):
         
 
         state = x = x.view(b*n, 1, h, w)
- 
+        
         x = self.vit(x)
         
         x, bias = x.chunk(2, dim = -1)
 
-
-        x_recon, vq_loss, encoding_index = self.vql(x)
+        x_recon, vq_loss, _ = self.vql(x)
+        #x_recon, vq_loss = x, torch.zeros(1, device = x.device).sum()
         
         x_recon = x_recon.view(b, n, self.w, self.low_dim)
 
+        
+
         if self.training:
-            point = int(b/3)
+            point = int(b/2)
     
             x = torch.cat([x.reshape(b,n,-1,self.low_dim)[:point], x_recon[point:]], dim = 0)
         
         else:
             x = x.reshape(b,n,-1,self.low_dim)
+        
+
 
 
         bias = bias.reshape(b,n,-1,self.low_dim)
@@ -586,16 +609,16 @@ class raven_clip(nn.Module):
         
         if K > 0:
             
-            
-            extra_candidates =                   self.sample_from_codebook(b)[:, :int(K/2)]  # [b, K, 16, dim]
+            point_x = int(K/2)
+            extra_candidates =                   self.sample_from_codebook(b)[:, :point_x]  # [b, K, 16, dim]
             extra_candidates = torch.cat([extra_candidates, 
-                                          x_recon[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*(K - int(K/2))*self.w, ))].reshape(b, K - int(K/2), self.w, self.low_dim)],
+                                          x_recon[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*(K - point_x)*self.w, ))].reshape(b, K - point_x, self.w, self.low_dim)],
                                          dim = 1)
             """
             extra_candidates = self.sample_from_codebook(b)  # [b, K, 16, dim]
             """
             
-            # extra_bias = torch.randn_like(extra_candidates)
+           
         else:
             extra_candidates = torch.empty(b, 0, 16, self.low_dim, device=x.device)
         
@@ -651,9 +674,49 @@ class raven_clip(nn.Module):
         
     def loss_function_ce(self, x, idx):
         
+
+
         return self.dio_loss(x, idx), (x.argmax(dim = -1) == idx).float().sum() if self.training else (x[:, :8].argmax(dim = -1) == idx).float().sum()
+        
+        
+        #return self.dio_loss(x, idx)F.cross_entropy(x/1,idx)
+
+    
+    
+    def loss_function_sl(self, *out, target):
+        
 
 
+        
+        keep_rule = (target != 7775)
+        
+        graph = out[0]# b 5 d
+        # print(graph.shape)
+
+        txt = out[1]# b t 7775 d
+        # print(txt.shape)
+
+        
+        loss_1 = 0
+    
+        right = torch.zeros(1).sum().to(graph.device)
+        
+        if keep_rule.float().sum().item() != 0:
+            
+
+            r = F.cosine_similarity(graph[keep_rule,:,None, None], txt[:,None,:], dim = -1).mean(dim = -2) #b 5, t, 7775
+            
+            # print(r.shape)
+            
+            loss_1 += F.cross_entropy(r.reshape(-1, 7775)/ self.temperature, target[keep_rule, None].expand(-1, r.shape[1]).reshape(-1))
+
+            right = (r.argmax(dim = -1).reshape(-1) == target[keep_rule, None].expand(-1, 9).reshape(-1)).float().sum()/9
+
+            """"""
+
+        
+        return loss_1, right
+    
     
     
     def loss_function(self, *out, target_shape, target_line, idx):
@@ -661,18 +724,13 @@ class raven_clip(nn.Module):
         # idx = None
         x_shape, x_line, z, x, y, bias, state, recon_up, recon_down, recon_bias_up, recon_bias_down, vq_loss = out
         
-        
-        
+ 
         y = y.unsqueeze(1)
-
-        bias_x = 1.0
        
         
-        loss = F.mse_loss(recon_up, state) +  F.mse_loss(recon_down, state) + bias_x*F.mse_loss(recon_bias_up, state) + bias_x*F.mse_loss(recon_bias_down, state)
+        loss = F.mse_loss(recon_up, state) + F.mse_loss(recon_bias_up, state) +  F.mse_loss(recon_down, state) + F.mse_loss(recon_bias_down, state)
 
-        loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + bias_x*F.mse_loss(recon_bias_up + recon_bias_down - .5, state) 
-        
-        
+        loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + F.mse_loss(recon_bias_up + recon_bias_down - .5, state) 
         
         right_shape = torch.zeros(1).sum().to(x.device)
         
@@ -681,36 +739,40 @@ class raven_clip(nn.Module):
         right_line = torch.zeros(1).sum().to(x.device)
 
         loss_2 = 0
+        """"""
+        """
         
+        loss_1, right_shape = self.loss_function_sl(x_shape, y, target = target_shape)
+        
+        loss_2, right_line = self.loss_function_sl(x_line, y, target = target_line)
+
+        """
         
         loss_3, right = self.loss_function_ce(x, idx)
 
         loss_4 = self.my_cov(z)
 
+        """
+
+        if self.training:
+            
+            self.beta.step()
+
+        """
         
         samlpes = torch.randn_like(bias)
+        
+    
         
         loss_5 = F.mse_loss(bias,  samlpes)
 
 
-        
+       
+        return 100*(loss + 10*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 3*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
 
-        return 10*loss + 80000*loss_stright + 10*loss_3 + 1*loss_4 + loss_5 + 100*torch.relu(vq_loss - 0.64) + 10000*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
+        #return 50*(loss + loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 10*torch.relu(vq_loss - 0.1) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
 
-        # #return 10*loss + 80000*loss_stright + 10*loss_3 + 1*loss_4 + loss_5 + 100*torch.relu(vq_loss - 0.6561) + 10000*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
 
-        # #return 10*loss + 80000*loss_stright + 10*loss_3 + 1*loss_4 + loss_5 + 100*torch.relu(vq_loss - 0.6724) + 10000*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
-
-        # return 10*loss + 80000*loss_stright + 100*loss_3 + 1*loss_4 + loss_5 + 100*torch.relu(vq_loss - 0.6889) + 10000*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
-        #                                                                                                    #83
-        # #return 10*loss + 100000*loss_stright + 100*loss_3 + 1*loss_4 + loss_5 + 100*torch.relu(vq_loss - 0.7056) + 10000*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
-        #                                                                                                    #84
-        # #return 10*loss + 100000*loss_stright + 100*loss_3 + 1*loss_4 + loss_5 + 100*torch.relu(vq_loss - 0.7225) + 10000*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
-        #                                                                                                    #85
-        # #return 10*loss + 80000*loss_stright + 20*loss_3 + 1*loss_4 + loss_5 + 100*torch.relu(vq_loss - 0.7744) + 10000*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #
-        #                                                                                                    #88
-        
-################################################################################################################################################################################################
         
     def recon_all(self, state, lambd = 0):
         
@@ -764,12 +826,22 @@ class raven_clip(nn.Module):
         # x_recon = self.decoder(x)
     
         return x_recon.reshape(b, n, h, w)
-    
 
 
 
     def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
+        """
+        Gumbel-Softmax + NLLLoss
         
+        Args:
+            logits: [B, C] 原始 logits
+            target: [B] 类别索引
+            temperature: Gumbel 温度
+        
+        Returns:
+            loss: 标量
+        """
+        # Gumbel 噪声
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
         
         # Gumbel-Softmax 对数概率
@@ -782,8 +854,8 @@ class raven_clip(nn.Module):
 
 
 
-    def dio_loss(self, logits, target, delta= 1, gumbeling = True):
-        
+    def dio_loss(self, logits, target, delta= 1e-5, gumbeling = False ):
+       
         
         if gumbeling:
             ce = self.gumbel_nll_loss(logits, target, reduction='none') 
@@ -792,7 +864,8 @@ class raven_clip(nn.Module):
         else:
             ce = F.cross_entropy(logits, target, reduction='none') 
             p = F.softmax(logits, dim=-1)
-
+    
+     
         
         if delta<1:
             p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
@@ -813,9 +886,7 @@ def mul_dot(a, b):
     
     assert a.dim() == b.dim() and a.dim() == 3 and b.shape[1] == 7776  and a.shape[1] == 1, 'error'
     
-    # a@transpose(b)
-    
-    # print(a.shape,b.shape, (a@transpose(b)).shape)
+
     return (a@transpose(b)).squeeze(-1)
     
     
@@ -838,6 +909,7 @@ if __name__ == '__main__':
     model = raven_clip()
     
     model.eval()
+   
     out = model(x)
     
     l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)
@@ -849,7 +921,7 @@ if __name__ == '__main__':
     summary(model, input_size=(1, 16, 80, 80),
         col_names=["input_size", "output_size", "num_params", 
                     "kernel_size", "mult_adds", "trainable"], device='cpu')
-    #accuracy = model.choose_accuracy(*out, idx = label)
+    
     
     from torch.utils.benchmark import Timer
 
@@ -870,6 +942,7 @@ if __name__ == '__main__':
 
     result = timer.blocked_autorange(min_run_time=10)  # 至少跑10秒
     print(f"{result.median*1000:.3f} ms ± {result.iqr*1000:.3f} ms")
+    
 
     
     

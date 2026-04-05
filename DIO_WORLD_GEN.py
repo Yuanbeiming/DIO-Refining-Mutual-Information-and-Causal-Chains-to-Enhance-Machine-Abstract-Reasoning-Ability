@@ -49,38 +49,7 @@ class Sigmoid_down(nn.Module):
         
         return torch.sigmoid(x) /2
 
-class Beta(nn.Module):
-    def __init__(self, alpha = 10, step_size = 0.01):
-        super(Beta, self).__init__()
 
-        self.register_buffer("beta",torch.ones(1))
-        
-        self.alpha = alpha
-        
-        self.step_size = step_size
-        
-        self.register_buffer("action",torch.zeros(1))
-        
-        step_beta = self.alpha/step_size
-        
-        self.step_beta = math.pi/step_beta
-        
-    def forward(self):
-        
-        
-        return self.beta.item()
-        
-
-
-    def step(self):
-        
-        self.beta += ((torch.sin(self.action) >= 0 ).long()*2 - 1)*self.step_size
-        # print((torch.sin(self.action) >= 0 ).long())
-        self.action += self.step_beta
-        """
-        if self.beta.item() < self.alpha:
-            self.beta += self.step_size
-        """
 class Recat(nn.Module):
     def __init__(self, num_aux_candidates=8):
         super(Recat, self).__init__()
@@ -520,42 +489,6 @@ class raven_clip(nn.Module):
 			                                        vq_loss_type = 'mse')
         self._add_spectral_norm()
 ################################################################################################################################################################################################
-        self.pretrain = True
-
-        if self.pretrain:
-            
-            pretrained_params = torch.load('./model_lico_net_regression_ex_1200000_neutral_now.pt', map_location = 'cpu')
-            
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_8857.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv_null_heads_null_1420000_neutral_best_9865.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_GENN_9746.pt', map_location = 'cpu')
-
-            #pretrained_params = torch.load('./model_lico_net_regression_ex_vql_emdv_2048_1200000_neutral_9934.pt', map_location = 'cpu')
-
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv2048_heads_1_1420000_neutral_best_9718.pt', map_location = 'cpu')
-            
-            for name, param in self.named_parameters():
-                if name in pretrained_params:
-                    if name[:3] == 'vit' or name[:7] == 'decoder':
-                        param.data = pretrained_params[name].data
-                        #param.requires_grad = False
-                        #print(f"Parameter '{name}' is loading.")  
-                    
-                else:
-                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
-   
-            for name, buffer in self.named_buffers():
-                if name in pretrained_params: 
-                    if name[:3] == 'vql':  
-	                    buffer.data.copy_(pretrained_params[name].data)
-	                    print(f"Buffer '{name}' is loading.")
-                else:
-                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
-                    
-              
-                
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
         else:
@@ -646,7 +579,7 @@ class raven_clip(nn.Module):
 
         x_recon, vq_loss, _ = self.vql(x)
         
-        x_recon_replaced, _ = self.random_replace(x_recon)
+        x_recon_replaced = self.random_replace(x_recon, max_replace=9)[0].detach()
         #x_recon, vq_loss = x, torch.zeros(1, device = x.device).sum()
         
         x_recon = x_recon.view(b, n, self.w, self.low_dim)
@@ -761,7 +694,7 @@ class raven_clip(nn.Module):
  
         y = y.unsqueeze(1)
         
-        replace_x = 0.8
+        replace_x = 0.5
        
         
         loss = F.mse_loss(recon_up, state) + F.mse_loss(recon_bias_up, state) +\
@@ -808,10 +741,11 @@ class raven_clip(nn.Module):
 
 
        
-        return 100*(loss + 100*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
+        #return 100*(loss + 100*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
         #2^14_embdv
 
-
+        return 100*(loss + 100*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 10*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
+        #2^14_embdv
         #return 100*(loss + 100*loss_stright) + 20*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
         #2048_embdv
         

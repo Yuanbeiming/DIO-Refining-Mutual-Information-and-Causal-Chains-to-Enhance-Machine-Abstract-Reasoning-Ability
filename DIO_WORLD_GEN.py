@@ -487,10 +487,9 @@ class raven_clip(nn.Module):
 			                                        0.995,
 			                                        vq_loss_type = 'mse')
         self._add_spectral_norm()
-        
+        self.replace_x = 0
         self.max_replace = 9
 ################################################################################################################################################################################################
-        
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
         else:
@@ -581,9 +580,10 @@ class raven_clip(nn.Module):
 
         x_recon, vq_loss, _ = self.vql(x)
         
-        x_recon_replaced, count = self.random_replace(x_recon.detach(), max_replace=self.max_replace)
+        x_recon_replaced, self.replace_x = self.random_replace(x = x_recon.detach(), max_replace=self.max_replace)
         
-        self.replace_x = (1 - count.sum()/(self.w*b*n)).item()
+        assert self.replace_x <= 1.0
+    
         #x_recon, vq_loss = x, torch.zeros(1, device = x.device).sum()
         
         x_recon = x_recon.view(b, n, self.w, self.low_dim)
@@ -875,6 +875,7 @@ class raven_clip(nn.Module):
     
     def random_replace(self, x, x_code = None, min_replace=1, max_replace=9):
         b, s, d = x.shape
+        assert s >= max_replace
         device = x.device
         
         if x_code is None:
@@ -895,7 +896,7 @@ class raven_clip(nn.Module):
         
         # print(mask)
         
-        return torch.where(mask, x_code, x), count
+        return torch.where(mask, x_code, x), 1 - (count.sum()/(b*s))
 
         
 def transpose(x):

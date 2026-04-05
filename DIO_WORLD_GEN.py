@@ -347,7 +347,6 @@ class raven_clip(nn.Module):
 
         self.temperature = temperature
 
-        self.beta = Beta(alpha = 20, step_size = 0.005)
         
         self.num_rule = 2
 
@@ -491,6 +490,7 @@ class raven_clip(nn.Module):
         
         self.max_replace = 9
 ################################################################################################################################################################################################
+        
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
         else:
@@ -581,7 +581,9 @@ class raven_clip(nn.Module):
 
         x_recon, vq_loss, _ = self.vql(x)
         
-        x_recon_replaced = self.random_replace(x_recon, max_replace=self.max_replace)[0].detach()
+        x_recon_replaced, count = self.random_replace(x_recon.detach(), max_replace=self.max_replace)
+        
+        self.replace_x = (1 - count.sum()/(self.w*b*n)).item()
         #x_recon, vq_loss = x, torch.zeros(1, device = x.device).sum()
         
         x_recon = x_recon.view(b, n, self.w, self.low_dim)
@@ -696,16 +698,16 @@ class raven_clip(nn.Module):
  
         y = y.unsqueeze(1)
         
-        replace_x = 1 - (self.max_replace/self.w)
+        # self.replace_x = 1 - (self.max_replace/self.w)
        
         
         loss = F.mse_loss(recon_up, state) + F.mse_loss(recon_bias_up, state) +\
             F.mse_loss(recon_down, state) + F.mse_loss(recon_bias_down, state) +\
-                replace_x*F.mse_loss(recon_replace_up, state) + replace_x*F.mse_loss(recon_replace_down, state)
+                self.replace_x*F.mse_loss(recon_replace_up, state) + self.replace_x*F.mse_loss(recon_replace_down, state)
 
         loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + \
             F.mse_loss(recon_bias_up + recon_bias_down - .5, state) + \
-                replace_x*F.mse_loss(recon_replace_up + recon_replace_down - .5, state)
+                self.replace_x*F.mse_loss(recon_replace_up + recon_replace_down - .5, state)
         
         right_shape = torch.zeros(1).sum().to(x.device)
         
@@ -813,11 +815,24 @@ class raven_clip(nn.Module):
 
 
     def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
-       
+        """
+        Gumbel-Softmax + NLLLoss
+        
+        Args:
+            logits: [B, C] 原始 logits
+            target: [B] 类别索引
+            temperature: Gumbel 温度
+        
+        Returns:
+            loss: 标量
+        """
+        # Gumbel 噪声
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
-
+        
+        # Gumbel-Softmax 对数概率
         log_probs = F.log_softmax((logits + gumbel_noise) / temperature, dim=1)
         
+        # NLLLoss
         return F.nll_loss(log_probs, target, reduction= reduction)
 
 
@@ -825,7 +840,16 @@ class raven_clip(nn.Module):
 
 
     def dio_loss(self, logits, target, delta= 1, gumbeling = False ):
-      
+        """
+        纯 CE 思路实现 DIO 损失
+        公式: CE + log( (1 - P_a + delta * P_a) / delta )
+        logits : (B, 8)   9-16 号候选 logits
+        target : (B,)     0-7 内的 gt 偏移
+        delta  : 正例系数倒数 = 1/delta
+        """
+        # 1. 交叉熵项（reduction='none' 保留每个样本的 loss）
+        #ce = F.cross_entropy(logits, target, reduction='none')   # -log P_a
+        
         if gumbeling:
             ce = self.gumbel_nll_loss(logits, target, reduction='none') 
             p = F.gumbel_softmax(logits, dim=-1)
@@ -834,7 +858,7 @@ class raven_clip(nn.Module):
             ce = F.cross_entropy(logits, target, reduction='none') 
             p = F.softmax(logits, dim=-1)
     
-
+        # 2. 取 P_a
         #p = F.softmax(logits, dim=-1)            # (B, 8)
         
         if delta<1:
@@ -855,15 +879,21 @@ class raven_clip(nn.Module):
         
         if x_code is None:
             x_code = self.sample_from_codebook(b, 1).reshape(b, s, d).detach()
-
+        
+        # 每个batch独立随机替换个数
         count = torch.randint(min_replace, max_replace + 1, (b,), device=device)
         
-
+        # print(count)
+        
+        # 两次argsort直接得排名，无需scatter
         ranks = torch.rand(b, s, device=device).argsort(dim=1).argsort(dim=1)
         
-     
+        # print(ranks)
+        
+        # 排名 < count 即被选中
         mask = (ranks < count.unsqueeze(1)).unsqueeze(-1).expand(-1, -1, d)
         
+        # print(mask)
         
         return torch.where(mask, x_code, x), count
 
@@ -900,7 +930,20 @@ if __name__ == '__main__':
     model = raven_clip()
     
     model.eval()
-   
+    # params = torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu')
+    # # model_dict =  model.state_dict()
+    
+    # # state_dict = {k:v for k,v in params.items() if k in model_dict.keys()}
+    # for k,q in model.named_parameters():
+    #     if k[:7] != 'tajador':
+    #         print(k)
+    #         q.data = params[k].data
+            
+
+    # 
+    # model_dict.update(state_dict)
+    # model.load_state_dict(model_dict)       
+    # model.load_state_dict(torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu'))
     out = model(x)
     
     l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)

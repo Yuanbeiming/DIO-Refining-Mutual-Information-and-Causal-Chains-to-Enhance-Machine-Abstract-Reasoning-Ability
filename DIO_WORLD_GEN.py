@@ -935,7 +935,7 @@ class raven_clip(nn.Module):
         return (ce + corr).mean()#, (logits.argmax(dim = -1) == target).float().sum()
     
     
-    def random_replace(self, x, x_code = None, min_replace=1, max_replace=8):
+    def random_replace(self, x, x_code = None, min_replace=1, max_replace=9):
         b, s, d = x.shape
         device = x.device
         

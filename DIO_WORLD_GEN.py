@@ -49,7 +49,38 @@ class Sigmoid_down(nn.Module):
         
         return torch.sigmoid(x) /2
 
+class Beta(nn.Module):
+    def __init__(self, alpha = 10, step_size = 0.01):
+        super(Beta, self).__init__()
 
+        self.register_buffer("beta",torch.ones(1))
+        
+        self.alpha = alpha
+        
+        self.step_size = step_size
+        
+        self.register_buffer("action",torch.zeros(1))
+        
+        step_beta = self.alpha/step_size
+        
+        self.step_beta = math.pi/step_beta
+        
+    def forward(self):
+        
+        
+        return self.beta.item()
+        
+
+
+    def step(self):
+        
+        self.beta += ((torch.sin(self.action) >= 0 ).long()*2 - 1)*self.step_size
+        # print((torch.sin(self.action) >= 0 ).long())
+        self.action += self.step_beta
+        """
+        if self.beta.item() < self.alpha:
+            self.beta += self.step_size
+        """
 class Recat(nn.Module):
     def __init__(self, num_aux_candidates=8):
         super(Recat, self).__init__()
@@ -60,15 +91,15 @@ class Recat(nn.Module):
       
         
         indices = []
-
+        # 1. 基础 3x3 矩阵 (0-8)
         indices += [0,1,2,3,4,5,6,7,8]
         
 
-        base_idx = 9  
+        base_idx = 9  # 候选起始索引
         for i in range(self.num_candidates-1):
             indices += [6, 7, base_idx + i]
             
-
+        # 3. 列方向基础: [0,3,6], [1,4,7], [2,5,8]
         indices += [0,3,6,1,4,7,2,5,8]
         
 
@@ -283,7 +314,7 @@ class raven_clip(nn.Module):
         vql_heads = 2
 
 
-        self.name = 'DIO_WORLD_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
+        self.name = 'DIO_WORLD_sn_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
             
         if dropout:
             _dropout = 0.1
@@ -485,11 +516,45 @@ class raven_clip(nn.Module):
 			                                        self.low_dim,
 			                                        vql_heads,
 			                                        self.beta,
-			                                        0.9998,
+			                                        0.995,
 			                                        vq_loss_type = 'mse')
         self._add_spectral_norm()
+################################################################################################################################################################################################
         self.pretrain = True
 
+        if self.pretrain:
+            
+            pretrained_params = torch.load('./model_lico_net_regression_ex_1200000_neutral_now.pt', map_location = 'cpu')
+            
+            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_8857.pt', map_location = 'cpu')
+
+            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv_null_heads_null_1420000_neutral_best_9865.pt', map_location = 'cpu')
+
+            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_GENN_9746.pt', map_location = 'cpu')
+
+            #pretrained_params = torch.load('./model_lico_net_regression_ex_vql_emdv_2048_1200000_neutral_9934.pt', map_location = 'cpu')
+
+            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv2048_heads_1_1420000_neutral_best_9718.pt', map_location = 'cpu')
+            
+            for name, param in self.named_parameters():
+                if name in pretrained_params:
+                    if name[:3] == 'vit' or name[:7] == 'decoder':
+                        param.data = pretrained_params[name].data
+                        #param.requires_grad = False
+                        #print(f"Parameter '{name}' is loading.")  
+                    
+                else:
+                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
+   
+            for name, buffer in self.named_buffers():
+                if name in pretrained_params: 
+                    if name[:3] == 'vql':  
+	                    buffer.data.copy_(pretrained_params[name].data)
+	                    print(f"Buffer '{name}' is loading.")
+                else:
+                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
+                    
+              
                 
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
@@ -500,6 +565,7 @@ class raven_clip(nn.Module):
         
 
     def _add_spectral_norm(self):
+        
         
         exclude_names = {'vit', 'decoder_up', 'decoder_down'}
         
@@ -517,32 +583,28 @@ class raven_clip(nn.Module):
                 spectral_norm(module)
                 print(f'add sn to: {name}')
 
-    def sample_from_codebook(self, b):
+    def sample_from_codebook(self, b, k = None):
         
         with torch.no_grad():
             embed = self.vql.embed  # [H, D, N]
             H, D, N = embed.shape
-            k = self.num_aux_candidates  # 采样数K
+            if k is None:
+                k = self.num_aux_candidates  # 采样数K
             w = self.w  # patch数量(16)
-            
-          
+
             rand_idx = torch.randint(
                 0, N, 
                 (b, k, w, H), 
                 device=embed.device
             )
             
-            
             embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
             
-          
             head_offsets = torch.arange(H, device=embed.device).view(1, 1, 1, H) * N
             global_idx = rand_idx + head_offsets  # [b, k, w, H]
             
-           
             samples = F.embedding(global_idx, embed_flat)
             
-           
             samples = samples.reshape(b, k, w, H * D)
             
         return samples.detach()  # [b, k, w, low_dim]
@@ -583,11 +645,13 @@ class raven_clip(nn.Module):
         x, bias = x.chunk(2, dim = -1)
 
         x_recon, vq_loss, _ = self.vql(x)
+        
+        x_recon_replaced, _ = self.random_replace(x_recon)
         #x_recon, vq_loss = x, torch.zeros(1, device = x.device).sum()
         
         x_recon = x_recon.view(b, n, self.w, self.low_dim)
 
-        
+        x_recon_replaced = x_recon_replaced.view(b, n, self.w, self.low_dim)
 
         if self.training:
             point = int(b/2)
@@ -597,7 +661,7 @@ class raven_clip(nn.Module):
         else:
             x = x.reshape(b,n,-1,self.low_dim)
         
-
+        #x = x.reshape(b,n,-1,self.low_dim)
 
 
         bias = bias.reshape(b,n,-1,self.low_dim)
@@ -607,16 +671,17 @@ class raven_clip(nn.Module):
         
         if K > 0:
             
-            point_x = int(K/2)
+            point_x = 0 #int(K/2)
             extra_candidates =                   self.sample_from_codebook(b)[:, :point_x]  # [b, K, 16, dim]
             extra_candidates = torch.cat([extra_candidates, 
                                           x_recon[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*(K - point_x)*self.w, ))].reshape(b, K - point_x, self.w, self.low_dim)],
                                          dim = 1)
             """
-            extra_candidates = self.sample_from_codebook(b)  # [b, K, 16, dim]
+            #extra_candidates = self.sample_from_codebook(b)  # [b, K, 16, dim]
+            extra_candidates = x[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*K*self.w, ))].reshape(b, K, self.w, self.low_dim)
             """
             
-           
+            # extra_bias = torch.randn_like(extra_candidates)
         else:
             extra_candidates = torch.empty(b, 0, 16, self.low_dim, device=x.device)
         
@@ -631,12 +696,15 @@ class raven_clip(nn.Module):
         
         recon_down = self.decoder_down(x_recon + torch.randn_like(x_recon) if self.training else x_recon)
         
+        
+        recon_replace_up = self.decoder_up(x_recon_replaced + torch.randn_like(x_recon) if self.training else x_recon)
+        
+        
+        recon_replace_down = self.decoder_down(x_recon_replaced + torch.randn_like(x_recon) if self.training else x_recon)
+        
 
         x = torch.cat([x, extra_candidates], dim = 1)
-        
-
-        
-        
+ 
         x = self.recat(x)
         
         x = self.g_function(x + torch.randn_like(x) if self.training else x)
@@ -654,7 +722,8 @@ class raven_clip(nn.Module):
         y = torch.randn(1,1).to(x.device)#self.txt_clip(self.txt_data.to(x.device))
 
         return *list(map(lambda t: t.mean(dim = 1).squeeze(), qkv)), x.reshape(-1, self.low_dim), \
-            sum(list(out)), y, bias.reshape(-1, self.w, self.low_dim), state, recon_up, recon_down, recon_bias_up, recon_bias_down, vq_loss
+            sum(list(out)), y, bias.reshape(-1, self.w, self.low_dim), state, \
+                recon_up, recon_down, recon_bias_up, recon_bias_down, recon_replace_up, recon_replace_down, vq_loss
         
     #"""
 
@@ -676,20 +745,32 @@ class raven_clip(nn.Module):
 
         return self.dio_loss(x, idx), (x.argmax(dim = -1) == idx).float().sum() if self.training else (x[:, :8].argmax(dim = -1) == idx).float().sum()
         
+        
+        #return self.dio_loss(x, idx)F.cross_entropy(x/1,idx)
+
+    
+
+    
     
     
     def loss_function(self, *out, target_shape, target_line, idx):
         
         # idx = None
-        x_shape, x_line, z, x, y, bias, state, recon_up, recon_down, recon_bias_up, recon_bias_down, vq_loss = out
+        x_shape, x_line, z, x, y, bias, state, recon_up, recon_down, recon_bias_up, recon_bias_down, recon_replace_up, recon_replace_down, vq_loss = out
         
  
         y = y.unsqueeze(1)
+        
+        replace_x = 0.8
        
         
-        loss = F.mse_loss(recon_up, state) + F.mse_loss(recon_bias_up, state) +  F.mse_loss(recon_down, state) + F.mse_loss(recon_bias_down, state)
+        loss = F.mse_loss(recon_up, state) + F.mse_loss(recon_bias_up, state) +\
+            F.mse_loss(recon_down, state) + F.mse_loss(recon_bias_down, state) +\
+                replace_x*F.mse_loss(recon_replace_up, state) + replace_x*F.mse_loss(recon_replace_down, state)
 
-        loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + F.mse_loss(recon_bias_up + recon_bias_down - .5, state) 
+        loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + \
+            F.mse_loss(recon_bias_up + recon_bias_down - .5, state) + \
+                replace_x*F.mse_loss(recon_replace_up + recon_replace_down - .5, state)
         
         right_shape = torch.zeros(1).sum().to(x.device)
         
@@ -727,9 +808,18 @@ class raven_clip(nn.Module):
 
 
        
-        return 100*(loss + 10*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 3*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right #16384
+        return 100*(loss + 100*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
+        #2^14_embdv
 
 
+        #return 100*(loss + 100*loss_stright) + 20*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
+        #2048_embdv
+        
+        
+        #return 50*(loss + 10*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + vq_loss, loss_stright,  vq_loss, right
+        # null_embdv
+
+################################################################################################################################################################################################
         
     def recon_all(self, state, lambd = 0):
         
@@ -787,19 +877,41 @@ class raven_clip(nn.Module):
 
 
     def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
-       
+        """
+        Gumbel-Softmax + NLLLoss
+        
+        Args:
+            logits: [B, C] 原始 logits
+            target: [B] 类别索引
+            temperature: Gumbel 温度
+        
+        Returns:
+            loss: 标量
+        """
+        # Gumbel 噪声
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
- 
+        
+        # Gumbel-Softmax 对数概率
         log_probs = F.log_softmax((logits + gumbel_noise) / temperature, dim=1)
         
+        # NLLLoss
         return F.nll_loss(log_probs, target, reduction= reduction)
 
 
 
 
 
-    def dio_loss(self, logits, target, delta= 1e-5, gumbeling = False ):
-       
+    def dio_loss(self, logits, target, delta= 1, gumbeling = False ):
+        """
+        纯 CE 思路实现 DIO 损失
+        公式: CE + log( (1 - P_a + delta * P_a) / delta )
+        logits : (B, 8)   9-16 号候选 logits
+        target : (B,)     0-7 内的 gt 偏移
+        delta  : 正例系数倒数 = 1/delta
+        """
+        # 1. 交叉熵项（reduction='none' 保留每个样本的 loss）
+        #ce = F.cross_entropy(logits, target, reduction='none')   # -log P_a
+        
         if gumbeling:
             ce = self.gumbel_nll_loss(logits, target, reduction='none') 
             p = F.gumbel_softmax(logits, dim=-1)
@@ -807,16 +919,45 @@ class raven_clip(nn.Module):
         else:
             ce = F.cross_entropy(logits, target, reduction='none') 
             p = F.softmax(logits, dim=-1)
+    
+        # 2. 取 P_a
+        #p = F.softmax(logits, dim=-1)            # (B, 8)
         
         if delta<1:
             p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
-    
+        
+            # 3. 修正项
             corr = torch.log((1 - p_alpha + delta * p_alpha) / delta)
             
         else:
             corr = 0
     
-        return (ce + corr).mean()
+        return (ce + corr).mean()#, (logits.argmax(dim = -1) == target).float().sum()
+    
+    
+    def random_replace(self, x, x_code = None, min_replace=1, max_replace=8):
+        b, s, d = x.shape
+        device = x.device
+        
+        if x_code is None:
+            x_code = self.sample_from_codebook(b, 1).reshape(b, s, d).detach()
+        
+        # 每个batch独立随机替换个数
+        count = torch.randint(min_replace, max_replace + 1, (b,), device=device)
+        
+        # print(count)
+        
+        # 两次argsort直接得排名，无需scatter
+        ranks = torch.rand(b, s, device=device).argsort(dim=1).argsort(dim=1)
+        
+        # print(ranks)
+        
+        # 排名 < count 即被选中
+        mask = (ranks < count.unsqueeze(1)).unsqueeze(-1).expand(-1, -1, d)
+        
+        # print(mask)
+        
+        return torch.where(mask, x_code, x), count
 
         
 def transpose(x):
@@ -826,7 +967,9 @@ def mul_dot(a, b):
     
     assert a.dim() == b.dim() and a.dim() == 3 and b.shape[1] == 7776  and a.shape[1] == 1, 'error'
     
-
+    # a@transpose(b)
+    
+    # print(a.shape,b.shape, (a@transpose(b)).shape)
     return (a@transpose(b)).squeeze(-1)
     
     
@@ -839,17 +982,30 @@ def reasoning(*args):
 
  
 if __name__ == '__main__':
-    
-    num_item = 1
-    x = torch.randn(num_item,16,80,80)
-    y = torch.randint(1,(num_item,7776,16)).long()
-    target = torch.randint(7776,(num_item,)).long()
-    label = torch.randint(8,(num_item,)).long()
+    #from torchsummary import summary
+    from torchinfo import summary
+    x = torch.randn(2,16,80,80)
+    y = torch.randint(1,(2,7776,16)).long()
+    target = torch.randint(7776,(2,)).long()
+    label = torch.randint(8,(2,)).long()
     
     model = raven_clip()
     
     model.eval()
-   
+    # params = torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu')
+    # # model_dict =  model.state_dict()
+    
+    # # state_dict = {k:v for k,v in params.items() if k in model_dict.keys()}
+    # for k,q in model.named_parameters():
+    #     if k[:7] != 'tajador':
+    #         print(k)
+    #         q.data = params[k].data
+            
+
+    # 
+    # model_dict.update(state_dict)
+    # model.load_state_dict(model_dict)       
+    # model.load_state_dict(torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu'))
     out = model(x)
     
     l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)
@@ -857,31 +1013,12 @@ if __name__ == '__main__':
 
     print(model)
 
-    from torchinfo import summary
-    summary(model, input_size=(1, 16, 80, 80),
+    #model = raven_clip().to('cuda' if torch.cuda.is_available() else 'cpu')
+    #summary(model, (16, 80, 80), device='cpu')
+    summary(model, input_size=(2, 16, 80, 80),
         col_names=["input_size", "output_size", "num_params", 
                     "kernel_size", "mult_adds", "trainable"], device='cpu')
-    
-    
-    from torch.utils.benchmark import Timer
-
-    stmt = "model(input_tensor)"
-    setup = "model.eval(); torch.cuda.synchronize()"
-    model = raven_clip(num_aux_candidates = 0)
-    device = torch.device("cuda")
-    #device = torch.device("cpu")
-
-    timer = Timer(
-        stmt=stmt,
-        setup=setup,
-        globals={"model": model.to(device), "input_tensor": x.to(device)},
-        num_threads=4,
-        label="Latency",
-        sub_label="batch=1"
-    )
-
-    result = timer.blocked_autorange(min_run_time=10)  # 至少跑10秒
-    print(f"{result.median*1000:.3f} ms ± {result.iqr*1000:.3f} ms")
+    #accuracy = model.choose_accuracy(*out, idx = label)
     
 
     

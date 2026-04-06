@@ -383,6 +383,8 @@ class raven_clip(nn.Module):
 
         num_decoder_depth = num_depth*2
         
+        if_cnn = False
+        
         self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
                                       # Mean(dim = -2, keepdim = True),
                                           ViT_reverse(#words = self.w, 
@@ -404,7 +406,7 @@ class raven_clip(nn.Module):
                                                                 dim_head = int(self.low_dim/num_head),
                                                                 
                                           ), 
-                                          To_image(),
+                                          To_image() if if_cnn else nn.Identity(),
                                           Sigmoid_up()
                                           
                                           
@@ -431,7 +433,7 @@ class raven_clip(nn.Module):
                                                                 dim_head = int(self.low_dim/num_head),
                                                                 
                                           ),
-                                          To_image(), 
+                                          To_image() if if_cnn else nn.Identity(),
                                           Sigmoid_down())
         
         

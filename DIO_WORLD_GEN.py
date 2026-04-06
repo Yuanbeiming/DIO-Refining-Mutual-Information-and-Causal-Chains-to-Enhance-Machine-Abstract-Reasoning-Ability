@@ -494,7 +494,7 @@ class raven_clip(nn.Module):
                             Mean(dim = -1))
 
         
-        self.vql = VectorQuantizerEMA_multi_head_revival(self.num_embeddings,
+        self.vql = VectorQuantizerEMA_multi_head_revival_with_recored(self.num_embeddings,
 			                                        self.low_dim,
 			                                        vql_heads,
 			                                        self.beta,

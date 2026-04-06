@@ -243,19 +243,22 @@ class Cross_Transformer(nn.Module):
 
         
 class To_image(nn.Module):
-    def __init__(self, c, h ,w):
+    def __init__(self, in_ch=1, hidden_ch=32):
         super().__init__()
+        # 主路径：3x3小核精炼
+        self.conv1 = nn.Conv2d(in_ch, hidden_ch, 3, padding=1)
+        self.conv2 = nn.Conv2d(hidden_ch, in_ch, 3, padding=1)
         
-        self.linear = nn.Linear(c*h*w, c*h*w)
+
+        nn.init.zeros_(self.conv2.weight)
+        nn.init.zeros_(self.conv2.bias)
         
     def forward(self, x):
-        
-        b, c, h, w = x.shape
-        
-        x = x + self.linear(x.reshape(b, -1)).reshape(b, c, h, w)
 
-
-        return x
+        out = F.leaky_relu(self.conv1(x), 0.2)
+        out = self.conv2(out)
+        
+        return out + x
 
 
 
@@ -264,7 +267,7 @@ class raven_clip(nn.Module):
         super(raven_clip,self).__init__()
 
         #self.num_embeddings = 8192
-        self.num_embeddings = 2**14
+        self.num_embeddings = 2**13
 
         
 
@@ -280,7 +283,7 @@ class raven_clip(nn.Module):
             num_depth = 3
             self.low_dim = 128
 
-        vql_heads = 2
+        vql_heads = 1
 
 
         self.name = 'DIO_WORLD_sn_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
@@ -350,7 +353,7 @@ class raven_clip(nn.Module):
         
         self.num_rule = 2
 
-        
+        if_cnn = False
             
         self.vit = nn.Sequential(ViT(image_size = size, 
                                    patch_size = patch,  
@@ -372,11 +375,14 @@ class raven_clip(nn.Module):
         )#b*16, 16, dimS
         
         #self.discrimnator = SinkhornDistance(eps=0.1, max_iter = 100, reduction='mean')
+        
+        self.j_position = nn.Parameter(torch.randn(1, self.w, self.low_dim))
 
-        num_decoder_depth = num_depth*2 + 2
+        num_decoder_depth = num_depth*2
         
         self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
                                       # Mean(dim = -2, keepdim = True),
+                                          #ViT_reverse_with_cls(#words = self.w, 
                                           ViT_reverse(#words = self.w, 
                                                                
                                                                 image_size = 80,  
@@ -395,13 +401,17 @@ class raven_clip(nn.Module):
                                                                 
                                                                 dim_head = int(self.low_dim/num_head),
                                                                 
-                                          ), Sigmoid_up()
+                                          ), 
+                                          To_image() if if_cnn else nn.Identity(),
+                                          Sigmoid_up()
                                           
                                           
                                           )
         
         self.decoder_down = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
                                       # Mean(dim = -2, keepdim = True),
+                                          #ViT_reverse_with_cls(#words = self.w, 
+
                                           ViT_reverse(#words = self.w, 
                                                                
                                                                 image_size = 80,  
@@ -420,7 +430,9 @@ class raven_clip(nn.Module):
                                                                 
                                                                 dim_head = int(self.low_dim/num_head),
                                                                 
-                                          ),Sigmoid_down())
+                                          ),
+                                          To_image() if if_cnn else nn.Identity(), 
+                                          Sigmoid_down())
         
         
         
@@ -480,16 +492,68 @@ class raven_clip(nn.Module):
                             Mean(dim = -1))
 
         
-        self.vql = VectorQuantizerEMA_multi_head_revival(self.num_embeddings,
-			                                        self.low_dim,
-			                                        vql_heads,
-			                                        self.beta,
-			                                        0.995,
-			                                        vq_loss_type = 'mse')
+        self.vql = VectorQuantizerEMA_multi_head_revival_with_recored(n_embed = self.num_embeddings,
+			                                        dim = self.low_dim,
+			                                        num_head = vql_heads,
+			                                        beta = self.beta,
+			                                        decay = 0.995,
+			                                        #decay = 1,
+			                                        vq_loss_type = 'mse',
+			                                        num_positions = self.w,
+			                                        MAX_sample = 1920e4)
         self._add_spectral_norm()
         self.replace_x = 0
-        self.max_replace = 9
+        self.max_replace = 0
 ################################################################################################################################################################################################
+        self.pretrain = True
+
+        if self.pretrain:
+            
+            pretrained_params = torch.load('./model_lico_net_regression_ex_1200000_neutral_now.pt', map_location = 'cpu')
+            
+            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_8857.pt', map_location = 'cpu')
+
+            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv_null_heads_null_1420000_neutral_best_9865.pt', map_location = 'cpu')
+
+            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_GENN_9746.pt', map_location = 'cpu')
+
+            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_now.pt', map_location = 'cpu')
+
+            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_best_GENN_9525.pt', map_location = 'cpu')
+            
+            for name, param in self.named_parameters():
+                if name in pretrained_params:
+                    #if name[:3] == 'vit' or name[:7] == 'decoder':
+                        
+                        #if name == 'decoder_down.1.pos_embedding' or name == 'decoder_up.1.pos_embedding':
+                           #param.data = torch.cat([pretrained_params[name].data, pretrained_params[name].data], dim = 1)
+                           #print(f"Parameter '{name}' is loading.") 
+                        #param.requires_grad = False
+
+                        #else:
+
+                            assert param.data.shape == pretrained_params[name].data.shape, print(name)
+                            param.data = pretrained_params[name].data  		
+                        
+                            print(f"Parameter '{name}' is loading.")  
+
+                
+                    
+                else:
+                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
+   
+            for name, buffer in self.named_buffers():
+                if name in pretrained_params:  
+                    if name[:3] != 'vql':
+                         buffer.data.copy_(pretrained_params[name].data)
+                         print(f"Buffer '{name}' is loading.")
+	                    
+	               
+                else:
+                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
+                    
+              
+                
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
         else:
@@ -578,27 +642,21 @@ class raven_clip(nn.Module):
         
         x, bias = x.chunk(2, dim = -1)
 
+        #x_recon, vq_loss, _ = self.vql(self.add_noise_to_patch(x, min_noise = 1, max_noise=int(self.w/2), zero_padding_p=0.8) if self.training else x)
+        
         x_recon, vq_loss, _ = self.vql(x)
-        
-        x_recon_replaced, self.replace_x = self.random_replace(x = x_recon.detach(), max_replace=self.max_replace)
-        
-        assert self.replace_x <= 1.0
-    
         #x_recon, vq_loss = x, torch.zeros(1, device = x.device).sum()
         
         x_recon = x_recon.view(b, n, self.w, self.low_dim)
 
-        x_recon_replaced = x_recon_replaced.view(b, n, self.w, self.low_dim)
-
         if self.training:
-            point = int(b/2)
+            point = b#int(b/2)
     
             x = torch.cat([x.reshape(b,n,-1,self.low_dim)[:point], x_recon[point:]], dim = 0)
         
         else:
             x = x.reshape(b,n,-1,self.low_dim)
-        
-        #x = x.reshape(b,n,-1,self.low_dim)
+
 
 
         bias = bias.reshape(b,n,-1,self.low_dim)
@@ -607,7 +665,7 @@ class raven_clip(nn.Module):
         K = self.num_aux_candidates
         
         if K > 0:
-            
+            """
             point_x = 0 #int(K/2)
             extra_candidates =                   self.sample_from_codebook(b)[:, :point_x]  # [b, K, 16, dim]
             extra_candidates = torch.cat([extra_candidates, 
@@ -616,7 +674,7 @@ class raven_clip(nn.Module):
             """
             #extra_candidates = self.sample_from_codebook(b)  # [b, K, 16, dim]
             extra_candidates = x[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*K*self.w, ))].reshape(b, K, self.w, self.low_dim)
-            """
+            
             
             # extra_bias = torch.randn_like(extra_candidates)
         else:
@@ -632,15 +690,12 @@ class raven_clip(nn.Module):
         
         
         recon_down = self.decoder_down(x_recon + torch.randn_like(x_recon) if self.training else x_recon)
-        
-        
-        recon_replace_up = self.decoder_up(x_recon_replaced + torch.randn_like(x_recon) if self.training else x_recon)
-        
-        
-        recon_replace_down = self.decoder_down(x_recon_replaced + torch.randn_like(x_recon) if self.training else x_recon)
-        
+
 
         x = torch.cat([x, extra_candidates], dim = 1)
+
+        x = x + self.j_position[None]
+        
  
         x = self.recat(x)
         
@@ -660,7 +715,7 @@ class raven_clip(nn.Module):
 
         return *list(map(lambda t: t.mean(dim = 1).squeeze(), qkv)), x.reshape(-1, self.low_dim), \
             sum(list(out)), y, bias.reshape(-1, self.w, self.low_dim), state, \
-                recon_up, recon_down, recon_bias_up, recon_bias_down, recon_replace_up, recon_replace_down, vq_loss
+                recon_up, recon_down, recon_bias_up, recon_bias_down, vq_loss
         
     #"""
 
@@ -682,18 +737,12 @@ class raven_clip(nn.Module):
 
         return self.dio_loss(x, idx), (x.argmax(dim = -1) == idx).float().sum() if self.training else (x[:, :8].argmax(dim = -1) == idx).float().sum()
         
-        
-        #return self.dio_loss(x, idx)F.cross_entropy(x/1,idx)
-
-    
-
-    
     
     
     def loss_function(self, *out, target_shape, target_line, idx):
         
         # idx = None
-        x_shape, x_line, z, x, y, bias, state, recon_up, recon_down, recon_bias_up, recon_bias_down, recon_replace_up, recon_replace_down, vq_loss = out
+        x_shape, x_line, z, x, y, bias, state, recon_up, recon_down, recon_bias_up, recon_bias_down, vq_loss = out
         
  
         y = y.unsqueeze(1)
@@ -702,12 +751,12 @@ class raven_clip(nn.Module):
        
         
         loss = F.mse_loss(recon_up, state) + F.mse_loss(recon_bias_up, state) +\
-            F.mse_loss(recon_down, state) + F.mse_loss(recon_bias_down, state) +\
-                self.replace_x*F.mse_loss(recon_replace_up, state) + self.replace_x*F.mse_loss(recon_replace_down, state)
+            F.mse_loss(recon_down, state) + F.mse_loss(recon_bias_down, state)
+            
 
         loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + \
-            F.mse_loss(recon_bias_up + recon_bias_down - .5, state) + \
-                self.replace_x*F.mse_loss(recon_replace_up + recon_replace_down - .5, state)
+            F.mse_loss(recon_bias_up + recon_bias_down - .5, state) 
+            
         
         right_shape = torch.zeros(1).sum().to(x.device)
         
@@ -744,11 +793,15 @@ class raven_clip(nn.Module):
         loss_5 = F.mse_loss(bias,  samlpes)
 
 
-       
+        #return 50*(loss + 50*loss_stright) + 2*loss_3 + 1*loss_4 + loss_5 + 10*torch.relu(vq_loss - 0.8), loss_stright,  vq_loss, right
+        #2^14_embdv
         #return 100*(loss + 100*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
         #2^14_embdv
 
         return 100*(loss + 100*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 10*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
+        #2^14_embdv
+
+        #return 100*(loss + 100*loss_stright) + 50*loss_3 + 1*loss_4 + loss_5 + 10*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
         #2^14_embdv
         #return 100*(loss + 100*loss_stright) + 20*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
         #2048_embdv
@@ -872,7 +925,33 @@ class raven_clip(nn.Module):
     
         return (ce + corr).mean()#, (logits.argmax(dim = -1) == target).float().sum()
     
+    def recon_randn_replace(self, state, lambd = 0):
+        
+        b, n, h, w = state.shape
+
+        # print(state.shape)
+ 
+        x = self.vit(state.view(b*n, 1, h, w))
+        
+        x, bias = x.chunk(2, dim = -1)
+        
+        x, _, _ = self.vql(x)
+        
+        x, _ = self.random_replace(x = x, max_replace=self.max_replace)
+        
+        # print(x.shape)
+        x = x.reshape(b, n, self.w, self.low_dim)
+        
+        bias = bias.reshape(b, n, self.w, self.low_dim)
+        
+        # bias = torch.tanh(bias)
+        # print(x.shape)
+        x = x + torch.randn_like(x)*lambd
+        x_recon = self.decoder_up(x) + self.decoder_down(x) - 0.5
+        # x_recon = self.decoder(x)
     
+        return x_recon.reshape(b, n, h, w)
+        
     def random_replace(self, x, x_code = None, min_replace=1, max_replace=9):
         b, s, d = x.shape
         assert s >= max_replace
@@ -896,7 +975,135 @@ class raven_clip(nn.Module):
         
         # print(mask)
         
-        return torch.where(mask, x_code, x), 1 - (count.sum()/(b*s))
+        return torch.where(mask, x_code, x), (count.sum()/(b*s)).item()
+
+
+    def add_noise_to_patch(self, x, min_noise=1, max_noise=8, noise_scale=5, zero_padding_p = 0.3):
+        b, s, d = x.shape
+        device = x.device
+        
+        # 每个batch随机决定加噪个数
+        count = torch.randint(min_noise, max_noise + 1, (b,), device=device)
+        
+        zero_padding = (torch.rand(b, device=device) > zero_padding_p).float()
+        
+        count = count * zero_padding
+        
+        # 在后16个位置(16-31)中随机选
+        rand = torch.rand(b, s, device=device)
+        ranks = rand.argsort(dim=1).argsort(dim=1)  # 排名
+        
+        # 局部mask (b, 16)
+        mask = ranks < count.unsqueeze(1)
+        
+       
+        noise = torch.randn_like(x) * noise_scale
+        return torch.where(mask.unsqueeze(-1).expand(-1, -1, d), (x + noise).data, x)
+    
+    def sample_from_codebook_topk(self, b, k=None, top_k=2048, strategy='hard', temperature=1.0):
+        """
+        基于聚类表Top-K的位置感知采样
+        
+        Args:
+            b: batch size
+            k: 采样候选数（默认为self.num_aux_candidates）
+            top_k: 每个位置只考虑聚类表中最常用的top_k个码本
+            strategy: 'hard' 均匀采样topk | 'soft' 按频率加权 | 'mix' 混合
+            temperature: 软采样时的温度（>1更均匀，<1更尖锐）
+        """
+        with torch.no_grad():
+            embed = self.vql.embed  # [H, D, N]
+            H, D, N = embed.shape
+            if k is None:
+                k = self.num_aux_candidates
+            w = self.w  # 16个位置
+            
+            # 检查聚类表是否可用
+            if not self.vql.map_sealed and self.vql.sample_count < 10000:
+                print(f"[Warning] Cluster map not ready ({self.vql.sample_count}), fallback to random")
+                return self.sample_from_codebook(b, k)
+            
+            # 获取聚类表 [H, w, N] -> 转为概率分布
+            # cluster_map = self.vql.cluster_map.float()  # [H, w, N]
+            cluster_map = self.vql.get_cluster_map(normalize=True)  # [H, w, N]
+            
+            samples_list = []
+            
+            for pos in range(w):  # 对每个绝对位置分别处理
+                # 获取该位置在所有头上的统计 [H, N]
+                pos_usage = cluster_map[:, pos, :]  # [H, N]
+                
+                if strategy == 'hard':
+                    # === 硬Top-K：只从高频码本中均匀选择 ===
+                    # 获取每个头的高频码本索引
+                    _, topk_indices = torch.topk(pos_usage, top_k, dim=-1)  # [H, top_k]
+                    
+                    # 从top_k中随机选择（每个头独立）
+                    rand_in_topk = torch.randint(0, top_k, (b, k, H), device=embed.device)
+                    selected_indices = torch.gather(
+                        topk_indices.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1), 
+                        -1, 
+                        rand_in_topk.unsqueeze(-1)
+                    ).squeeze(-1)  # [b, k, H]
+                    
+                elif strategy == 'soft':
+                    # === 软Top-K：按频率加权的多项式采样 ===
+                    # 先截断到top_k，再归一化
+                    values, indices = torch.topk(pos_usage, top_k, dim=-1)  # [H, top_k]
+                    
+                    # 温度调节
+                    probs = F.softmax(values / temperature, dim=-1)  # [H, top_k]
+                    
+                    # 多项式采样（每个头独立）
+                    # 使用torch.multinomial，需要对每个头循环或广播
+                    selected_in_topk = torch.multinomial(
+                        probs.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1).reshape(-1, top_k),
+                        num_samples=1,
+                        replacement=True
+                    ).reshape(b, k, H)  # [b, k, H] 这是在top_k内的索引
+                    
+                    # 映射回真实码本索引
+                    selected_indices = torch.gather(
+                        indices.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1),
+                        -1,
+                        selected_in_topk.unsqueeze(-1)
+                    ).squeeze(-1)  # [b, k, H]
+                    
+                elif strategy == 'mix':
+                    # === 混合策略：80%高频 + 20%随机探索 ===
+                    mix_mask = torch.rand(b, k, H, device=embed.device) < 0.8
+                    
+                    # 硬topk部分
+                    _, topk_indices = torch.topk(pos_usage, top_k, dim=-1)
+                    rand_in_topk = torch.randint(0, top_k, (b, k, H), device=embed.device)
+                    hard_samples = torch.gather(
+                        topk_indices.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1),
+                        -1,
+                        rand_in_topk.unsqueeze(-1)
+                    ).squeeze(-1)
+                    
+                    # 随机部分
+                    random_samples = torch.randint(0, N, (b, k, H), device=embed.device)
+                    
+                    selected_indices = torch.where(mix_mask, hard_samples, random_samples)
+                
+                else:
+                    raise ValueError(f"Unknown strategy: {strategy}")
+                
+                # 查表获取嵌入 [b, k, H, D]
+                head_offsets = torch.arange(H, device=embed.device).view(1, 1, H) * N
+                global_idx = selected_indices + head_offsets  # [b, k, H]
+                
+                embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
+                pos_samples = F.embedding(global_idx.reshape(-1), embed_flat).reshape(b, k, H, D)
+                samples_list.append(pos_samples)
+            
+            # 合并所有位置 [b, k, w, H, D] -> [b, k, w, H*D]
+            samples = torch.stack(samples_list, dim=2)  # [b, k, w, H, D]
+            samples = samples.reshape(b, k, w, H * D)
+            
+            return samples.detach()
+       
 
         
 def transpose(x):

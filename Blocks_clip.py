@@ -1351,7 +1351,7 @@ class ViT_reverse_with_cls(nn.Module):
         
         # 加噪
         noise = torch.randn_like(x) * noise_scale
-        return torch.where(mask.unsqueeze(-1).expand(-1, -1, d), x + noise, x), count
+        return torch.where(mask.unsqueeze(-1).expand(-1, -1, d), x + noise, x)
 
 
 class Mixed_gussan(nn.Module):

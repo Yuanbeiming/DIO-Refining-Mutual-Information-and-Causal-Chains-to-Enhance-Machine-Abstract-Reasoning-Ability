@@ -271,7 +271,7 @@ class raven_clip(nn.Module):
         super(raven_clip,self).__init__()
 
         #self.num_embeddings = 8192
-        self.num_embeddings = 2**14
+        self.num_embeddings = 2**13
 
         
 
@@ -381,7 +381,7 @@ class raven_clip(nn.Module):
         #self.discrimnator = SinkhornDistance(eps=0.1, max_iter = 100, reduction='mean')
         self.j_position = nn.Parameter(torch.randn(1, self.w, self.low_dim))
 
-        num_decoder_depth = num_depth*2 + 2
+        num_decoder_depth = num_depth*2
         
         self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
                                       # Mean(dim = -2, keepdim = True),
@@ -502,50 +502,6 @@ class raven_clip(nn.Module):
         self.replace_x = 1
         self.max_replace = 10
 ################################################################################################################################################################################################
-        self.pretrain = True
-
-        if self.pretrain:
-            
-            pretrained_params = torch.load('./model_lico_net_regression_ex_1200000_neutral_now.pt', map_location = 'cpu')
-            
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_8857.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv_null_heads_null_1420000_neutral_best_9865.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_GENN_9746.pt', map_location = 'cpu')
-
-            #pretrained_params = torch.load('./model_lico_net_regression_ex_vql_emdv_2048_1200000_neutral_9934.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_miniloss_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_9525.pt', map_location = 'cpu')
-            
-            for name, param in self.named_parameters():
-                if name in pretrained_params:
-                    #if name[:3] == 'vit' or name[:7] == 'decoder':
-                        """
-                         if name[:len('decoder_down.1.transformer.layers.6')] != 'decoder_down.1.transformer.layers.6' or \
-                            name[:len('decoder_down.1.transformer.layers.5')] != 'decoder_down.1.transformer.layers.5' or \
-                            name[:len('decoder_up.1.transformer.layers.5')] != 'decoder_up.1.transformer.layers.5' or \
-                            name[:len('decoder_up.1.transformer.layers.5')] != 'decoder_up.1.transformer.layers.5':
-                        """
-                        param.data = pretrained_params[name].data
-                        #param.requires_grad = False
-                        print(f"Parameter '{name}' is loading.")  
-
-                        if name[:7] != 'decoder':
-                                param.requires_grad = False
-                    
-                else:
-                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
-   
-            for name, buffer in self.named_buffers():
-                if name in pretrained_params: 
-                    #if name[:3] != 'vql':  
-	                    buffer.data.copy_(pretrained_params[name].data)
-	                    print(f"Buffer '{name}' is loading.")
-                else:
-                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
-                    
-              
                 
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)

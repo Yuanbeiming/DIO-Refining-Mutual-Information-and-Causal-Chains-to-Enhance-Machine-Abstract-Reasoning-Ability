@@ -505,55 +505,6 @@ class raven_clip(nn.Module):
         self.replace_x = 0
         self.max_replace = 0
 ################################################################################################################################################################################################
-        self.pretrain = True
-
-        if self.pretrain:
-            
-            pretrained_params = torch.load('./model_lico_net_regression_ex_1200000_neutral_now.pt', map_location = 'cpu')
-            
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_8857.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv_null_heads_null_1420000_neutral_best_9865.pt', map_location = 'cpu')
-
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_GENN_9746.pt', map_location = 'cpu')
-
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_now.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_best_GENN_9525.pt', map_location = 'cpu')
-            
-            for name, param in self.named_parameters():
-                if name in pretrained_params:
-                    #if name[:3] == 'vit' or name[:7] == 'decoder':
-                        
-                        #if name == 'decoder_down.1.pos_embedding' or name == 'decoder_up.1.pos_embedding':
-                           #param.data = torch.cat([pretrained_params[name].data, pretrained_params[name].data], dim = 1)
-                           #print(f"Parameter '{name}' is loading.") 
-                        #param.requires_grad = False
-
-                        #else:
-
-                            assert param.data.shape == pretrained_params[name].data.shape, print(name)
-                            param.data = pretrained_params[name].data  		
-                        
-                            print(f"Parameter '{name}' is loading.")  
-
-                
-                    
-                else:
-                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
-   
-            for name, buffer in self.named_buffers():
-                if name in pretrained_params:  
-                    if name[:3] != 'vql':
-                         buffer.data.copy_(pretrained_params[name].data)
-                         print(f"Buffer '{name}' is loading.")
-	                    
-	               
-                else:
-                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
-                    
-              
-                
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
         else:
@@ -667,12 +618,12 @@ class raven_clip(nn.Module):
         if K > 0:
             """
             point_x = 0 #int(K/2)
-            extra_candidates =                   self.sample_from_codebook(b)[:, :point_x]  # [b, K, 16, dim]
+            extra_candidates =                   self.sample_from_codebook_topk(b)[:, :point_x]  # [b, K, 16, dim]
             extra_candidates = torch.cat([extra_candidates, 
                                           x_recon[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*(K - point_x)*self.w, ))].reshape(b, K - point_x, self.w, self.low_dim)],
                                          dim = 1)
             """
-            #extra_candidates = self.sample_from_codebook(b)  # [b, K, 16, dim]
+            #extra_candidates = self.sample_from_codebook_topk(b)  # [b, K, 16, dim]
             extra_candidates = x[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*K*self.w, ))].reshape(b, K, self.w, self.low_dim)
             
             
@@ -958,7 +909,7 @@ class raven_clip(nn.Module):
         device = x.device
         
         if x_code is None:
-            x_code = self.sample_from_codebook(b, 1).reshape(b, s, d).detach()
+            x_code = self.sample_from_codebook_topk(b, 1).reshape(b, s, d).detach()
         
         # 每个batch独立随机替换个数
         count = torch.randint(min_replace, max_replace + 1, (b,), device=device)

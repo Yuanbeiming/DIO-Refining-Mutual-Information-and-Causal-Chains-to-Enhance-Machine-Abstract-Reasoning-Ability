@@ -1327,7 +1327,7 @@ class ViT_reverse_with_cls(nn.Module):
         # MLP
         return x 
     
-    def add_noise_to_patch(self, x, min_noise=1, max_noise=8, noise_scale=5, zero_padding_p = 0.3):
+    def add_noise_to_patch(self, x, min_noise=1, max_noise=8, noise_scale=5, zero_padding_p = 0.5):
         b, s, d = x.shape
         device = x.device
         

@@ -505,53 +505,6 @@ class raven_clip(nn.Module):
         self.replace_x = 0
         self.max_replace = 0
 ################################################################################################################################################################################################
-        self.pretrain = True
-
-        if self.pretrain:
-            
-            pretrained_params = torch.load('./model_lico_net_regression_ex_1200000_neutral_now.pt', map_location = 'cpu')
-            
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_8857.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv_null_heads_null_1420000_neutral_best_9865.pt', map_location = 'cpu')
-
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_GENN_9746.pt', map_location = 'cpu')
-
-            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_now.pt', map_location = 'cpu')
-
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_best_GENN_9525.pt', map_location = 'cpu')
-            
-            for name, param in self.named_parameters():
-                if name in pretrained_params:
-                    #if name[:3] == 'vit' or name[:7] == 'decoder':
-                        
-                        #if name == 'decoder_down.1.pos_embedding' or name == 'decoder_up.1.pos_embedding':
-                           #param.data = torch.cat([pretrained_params[name].data, pretrained_params[name].data], dim = 1)
-                           #print(f"Parameter '{name}' is loading.") 
-                        #param.requires_grad = False
-
-                        #else:
-
-                            assert param.data.shape == pretrained_params[name].data.shape, print(name)
-                            param.data = pretrained_params[name].data  		
-                        
-                            print(f"Parameter '{name}' is loading.")  
-
-                
-                    
-                else:
-                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
-   
-            for name, buffer in self.named_buffers():
-                if name in pretrained_params:  
-                    if name[:3] != 'vql':
-                         buffer.data.copy_(pretrained_params[name].data)
-                         print(f"Buffer '{name}' is loading.")
-	                    
-	               
-                else:
-                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
-                    
               
                 
         if self.vql.decay < 1:

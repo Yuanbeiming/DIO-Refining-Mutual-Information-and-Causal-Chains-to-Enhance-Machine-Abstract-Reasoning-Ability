@@ -1874,7 +1874,7 @@ class VectorQuantizerEMA_multi_head_revival_with_recored(nn.Module):
         """
         更新聚类统计表
         input_heads: (b, s, num_head, head_dim)
-        embed_ind_heads: list of (b, s) 每个头的聚类索引
+        embed_ind_heads: list of (b, s, 1) 每个头的聚类索引
         """
         if self.map_sealed:
             return
@@ -1891,7 +1891,7 @@ class VectorQuantizerEMA_multi_head_revival_with_recored(nn.Module):
             
         # 对每个头分别统计
         for h in range(self.num_head):
-            indices = embed_ind_heads[h]  # (b, s)
+            indices = embed_ind_heads[h].squeeze(-1)  # (b, s, 1)
             # 转为 one-hot 并累加到对应位置
             # one_hot shape: (b, s, n_embed)
             one_hot = F.one_hot(indices, self.n_embed).long()
@@ -1936,13 +1936,13 @@ class VectorQuantizerEMA_multi_head_revival_with_recored(nn.Module):
         quantize_heads, embed_ind_heads = [], []
 
         for h in range(self.num_head):
-            head_input = input_heads[:, :, h, :].contiguous().view(-1, self.head_dim)
+            head_input = input_heads[:, :, h, :].contiguous().view(-1, self.head_dim)#b*s, d
             dist = (
                 head_input.pow(2).sum(1, keepdim=True)
                 - 2 * head_input @ self.embed[h]
-                + self.embed[h].pow(2).sum(0, keepdim=True)
+                + self.embed[h].pow(2).sum(0, keepdim=True) #b*s, d × d, n
             )
-            _, embed_ind = (-dist).max(1)
+            _, embed_ind = (-dist).max(1) #b*s
             embed_onehot = F.one_hot(embed_ind, self.n_embed).type(head_input.dtype)
             quantize_h = F.embedding(embed_ind, self.embed[h].t()).view(b, s, 1, self.head_dim)
             quantize_heads.append(quantize_h)

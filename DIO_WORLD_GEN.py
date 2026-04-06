@@ -505,6 +505,53 @@ class raven_clip(nn.Module):
         self.replace_x = 0
         self.max_replace = 0
 ################################################################################################################################################################################################
+        self.pretrain = True
+
+        if self.pretrain:
+            
+            pretrained_params = torch.load('./model_lico_net_regression_ex_1200000_neutral_now.pt', map_location = 'cpu')
+            
+            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_8857.pt', map_location = 'cpu')
+
+            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv_null_heads_null_1420000_neutral_best_9865.pt', map_location = 'cpu')
+
+            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_1200000_neutral_best_GENN_9746.pt', map_location = 'cpu')
+
+            #pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_now.pt', map_location = 'cpu')
+
+            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_1_1420000_neutral_best_GENN_9525.pt', map_location = 'cpu')
+            
+            for name, param in self.named_parameters():
+                if name in pretrained_params:
+                    #if name[:3] == 'vit' or name[:7] == 'decoder':
+                        
+                        #if name == 'decoder_down.1.pos_embedding' or name == 'decoder_up.1.pos_embedding':
+                           #param.data = torch.cat([pretrained_params[name].data, pretrained_params[name].data], dim = 1)
+                           #print(f"Parameter '{name}' is loading.") 
+                        #param.requires_grad = False
+
+                        #else:
+
+                            assert param.data.shape == pretrained_params[name].data.shape, print(name)
+                            param.data = pretrained_params[name].data  		
+                        
+                            print(f"Parameter '{name}' is loading.")  
+
+                
+                    
+                else:
+                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
+   
+            for name, buffer in self.named_buffers():
+                if name in pretrained_params:  
+                    if name[:3] != 'vql':
+                         buffer.data.copy_(pretrained_params[name].data)
+                         print(f"Buffer '{name}' is loading.")
+	                    
+	               
+                else:
+                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
+                    
               
                 
         if self.vql.decay < 1:
@@ -953,7 +1000,7 @@ class raven_clip(nn.Module):
         noise = torch.randn_like(x) * noise_scale
         return torch.where(mask.unsqueeze(-1).expand(-1, -1, d), (x + noise).data, x)
     
-    def sample_from_codebook_topk(self, b, k=None, top_k=2048, strategy='hard', temperature=1.0):
+    def sample_from_codebook_topk(self, b, k=None, top_k=None, strategy='hard', temperature=1.0, perturb_scale = .1):
         """
         基于聚类表Top-K的位置感知采样
         
@@ -971,6 +1018,9 @@ class raven_clip(nn.Module):
                 k = self.num_aux_candidates
             w = self.w  # 16个位置
             
+            if top_k is None:
+                top_k= int(N/self.w) + 256
+            
             # 检查聚类表是否可用
             if not self.vql.map_sealed and self.vql.sample_count < 10000:
                 print(f"[Warning] Cluster map not ready ({self.vql.sample_count}), fallback to random")
@@ -978,10 +1028,10 @@ class raven_clip(nn.Module):
             
             # 获取聚类表 [H, w, N] -> 转为概率分布
             # cluster_map = self.vql.cluster_map.float()  # [H, w, N]
-            cluster_map = self.vql.get_cluster_map(normalize=True)  # [H, w, N]
+            cluster_map = self.vql.get_cluster_map(normalize=False)  # [H, w, N]
             
             samples_list = []
-            
+                       
             for pos in range(w):  # 对每个绝对位置分别处理
                 # 获取该位置在所有头上的统计 [H, N]
                 pos_usage = cluster_map[:, pos, :]  # [H, N]

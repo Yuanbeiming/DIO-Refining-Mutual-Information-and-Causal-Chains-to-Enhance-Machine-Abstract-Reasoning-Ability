@@ -1225,8 +1225,6 @@ class ViT_reverse_aux_linear(nn.Module):
         # print(x)
         x = x + self.pos_embedding[:, :n]
         
-        if self.training and np.random.rand() < 0.5: 
-            x = self.random_drop_vectors(x, max_drop=int(x.shape[1]/4) )
         # dropout
         x = self.dropout(x)
         # 输入到transformer
@@ -1241,20 +1239,7 @@ class ViT_reverse_aux_linear(nn.Module):
         # MLP
         return x  
     
-    def random_drop_vectors(self, x, min_drop=0, max_drop=8):
-        b, s, d = x.shape
-        device = x.device
-        
-        # 每个batch随机丢弃个数
-        drop_count = torch.randint(min_drop, max_drop + 1, (b,), device=device)
-        
-        # 随机排名：排名 < drop_count 的位置被丢弃
-        ranks = torch.rand(b, s, device=device).argsort(dim=1).argsort(dim=1)
-        drop_mask = (ranks < drop_count.unsqueeze(1)).unsqueeze(-1).expand(-1, -1, d)
-        
-        # 丢弃位置填0（或用其他填充策略）
-        return x.masked_fill(drop_mask, 0), drop_mask
-        #return torch.where(drop_mask, torch.randn(b, s, d, device=device), x), drop_mask
+
     
     
     
@@ -1296,14 +1281,7 @@ class ViT_reverse_with_cls(nn.Module):
  
         self.input_transformer = value_Transformer(dim, patch_dim, 1, heads, dim_head, patch_dim, dropout)
         
-        # if depth >= 2:
-            
-        #     self.transformer = Transformer(patch_dim, depth - 1, heads, int(patch_dim/heads), patch_dim, dropout)
-            
-        # else:
-            
-        #     self.transformer = nn.Identity()
-            
+         
             
         self.transformer = Transformer(patch_dim, depth - 1, heads, dim_head, patch_dim, dropout) if depth > 1 else nn.Identity()
  
@@ -1326,6 +1304,9 @@ class ViT_reverse_with_cls(nn.Module):
         # 追加位置编码
         # print(x)
         x += self.pos_embedding[:, :n + self.num_cls]
+        
+        if self.training and np.random.rand() < 0.33: 
+            x = self.random_drop_vectors(x, max_drop=int(x.shape[1]/4) )
         # dropout
         x = self.dropout(x)
         # 输入到transformer
@@ -1337,7 +1318,22 @@ class ViT_reverse_with_cls(nn.Module):
         x = self.to_patch_embedding(x)
         # x_ = x.mean(dim = 1, keepdim = True) if self.pool == 'mean' else x[:,1:(n + 1)]
         # MLP
-        return x  
+        return x 
+    
+    def random_drop_vectors(self, x, min_drop=0, max_drop=8):
+        b, s, d = x.shape
+        device = x.device
+        
+        # 每个batch随机丢弃个数
+        drop_count = torch.randint(min_drop, max_drop + 1, (b,), device=device)
+        
+        # 随机排名：排名 < drop_count 的位置被丢弃
+        ranks = torch.rand(b, s, device=device).argsort(dim=1).argsort(dim=1)
+        drop_mask = (ranks < drop_count.unsqueeze(1)).unsqueeze(-1).expand(-1, -1, d)
+        
+        # 丢弃位置填0（或用其他填充策略）
+        return x.masked_fill(drop_mask, 0)
+        #return torch.where(drop_mask, torch.randn(b, s, d, device=device), x), drop_mask
 
 
 class Mixed_gussan(nn.Module):

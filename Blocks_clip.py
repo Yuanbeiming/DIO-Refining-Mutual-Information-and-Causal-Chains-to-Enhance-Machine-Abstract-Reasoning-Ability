@@ -1312,7 +1312,7 @@ class ViT_reverse_with_cls(nn.Module):
         # print(x)
         x += self.pos_embedding[:, :n + self.num_cls]
         
-        if self.training and np.random.rand() < 0.33: 
+        if self.training: 
             x = self.add_noise_to_patch(x, max_drop=int(x.shape[1]/4) )
         # dropout
         x = self.dropout(x)

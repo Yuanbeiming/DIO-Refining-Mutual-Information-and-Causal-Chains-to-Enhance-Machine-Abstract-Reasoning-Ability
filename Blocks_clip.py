@@ -7,7 +7,13 @@ import numpy as np
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 import torch.distributed as distri
-
+from pathlib import Path
+import atexit
+import signal
+import sys
+import os
+from typing import Optional, Union, Dict, Any
+import datetime
 
 
 def conv1x1(in_channel, out_channel, stride=1):
@@ -1218,6 +1224,9 @@ class ViT_reverse_aux_linear(nn.Module):
         # 追加位置编码
         # print(x)
         x = x + self.pos_embedding[:, :n]
+        
+        if self.training and np.random.rand() < 0.5: 
+            x = self.random_drop_vectors(x)
         # dropout
         x = self.dropout(x)
         # 输入到transformer
@@ -1232,11 +1241,25 @@ class ViT_reverse_aux_linear(nn.Module):
         # MLP
         return x  
     
+    def random_drop_vectors(self, x, min_drop=0, max_drop=8):
+        b, s, d = x.shape
+        device = x.device
+        
+        # 每个batch随机丢弃个数
+        drop_count = torch.randint(min_drop, max_drop + 1, (b,), device=device)
+        
+        # 随机排名：排名 < drop_count 的位置被丢弃
+        ranks = torch.rand(b, s, device=device).argsort(dim=1).argsort(dim=1)
+        drop_mask = (ranks < drop_count.unsqueeze(1)).unsqueeze(-1).expand(-1, -1, d)
+        
+        # 丢弃位置填0（或用其他填充策略）
+        return x.masked_fill(drop_mask, 0), drop_mask
+        #return torch.where(drop_mask, torch.randn(b, s, d, device=device), x), drop_mask
     
     
     
 class ViT_reverse_with_cls(nn.Module):
-    def __init__(self, *, words, image_size, patch_size,  dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
+    def __init__(self, *, image_size, patch_size,  dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
         #dim: lengh of token ，depth： depth of tranformer, dim_head: dim of signle head, mlp_dim: dim of mlp of transfomer
         super().__init__()
         image_height, image_width = image_size if isinstance(image_size, tuple) or  isinstance(image_size, list) else pair(image_size)
@@ -1262,7 +1285,7 @@ class ViT_reverse_with_cls(nn.Module):
             
         # )
         # 定义位置编码
-        self.pos_embedding = nn.Parameter(torch.randn(1, words + num_cls, dim))
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + num_cls, dim))
         # 定义类别向量
         
 
@@ -1273,13 +1296,16 @@ class ViT_reverse_with_cls(nn.Module):
  
         self.input_transformer = value_Transformer(dim, patch_dim, 1, heads, dim_head, patch_dim, dropout)
         
-        if depth >= 2:
+        # if depth >= 2:
             
-            self.transformer = Transformer(patch_dim, depth - 1, heads, int(patch_dim/heads), patch_dim, dropout)
+        #     self.transformer = Transformer(patch_dim, depth - 1, heads, int(patch_dim/heads), patch_dim, dropout)
             
-        else:
+        # else:
             
-            self.transformer = nn.Identity()
+        #     self.transformer = nn.Identity()
+            
+            
+        self.transformer = Transformer(patch_dim, depth - 1, heads, dim_head, patch_dim, dropout) if depth > 1 else nn.Identity()
  
  
         self.to_latent = nn.Identity()
@@ -1898,6 +1924,44 @@ def print_frozen_names_only(model):
     return frozen_names
 
 
+
+class GracefulSaver:
+    def __init__(self, model, optimizer, prefix="ckpt", save_dir="./"):
+        self.model = model
+        self.optimizer = optimizer
+        self.prefix = prefix
+        self.save_dir = save_dir
+        self.interrupted = False
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 保存原始处理程序以便恢复
+        self.original_handler = signal.signal(signal.SIGINT, self._handler)
+    
+    def _handler(self, signum, frame):
+        self.interrupted = True
+        print(f"\nCtrl+C pressed. Saving checkpoint...")
+        self.save()  # 去掉时间戳，直接覆盖保存
+        print("Checkpoint saved. Exiting...")
+        exit(0)
+    
+    def save(self):
+        """保存检查点，自动处理 DDP"""
+        # 解包 DDP（如果是的话）
+        model_to_save = self.model.module if hasattr(self.model, 'module') else self.model
+        
+        model_path = os.path.join(self.save_dir, f"{self.prefix}_model.pt")
+        opt_path = os.path.join(self.save_dir, f"{self.prefix}_optimizer.pt")
+        
+        torch.save(model_to_save.state_dict(), model_path)
+        torch.save(self.optimizer.state_dict(), opt_path)
+        print(f"Saved: {model_path} & {opt_path}")
+    
+    def restore_handler(self):
+        """恢复原始信号处理（如需要）"""
+        signal.signal(signal.SIGINT, self.original_handler)
+
+
+        
 def print_lr_dict(optimizer, model=None):
     """
     打印优化器学习率
@@ -1926,3 +1990,5 @@ def print_lr_dict(optimizer, model=None):
         
         print(f"{group_name:30s} | lr={lr:.2e} | wd={wd:.2e} | params={n_elements:,}")
     print("-" * 60)
+    
+    

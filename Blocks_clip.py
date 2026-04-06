@@ -1313,7 +1313,7 @@ class ViT_reverse_with_cls(nn.Module):
         x += self.pos_embedding[:, :n + self.num_cls]
         
         if self.training: 
-            x = self.add_noise_to_patch(x, max_drop=int(x.shape[1]/4) )
+            x = self.add_noise_to_patch(x, max_noise=int(x.shape[1]/4) )
         # dropout
         x = self.dropout(x)
         # 输入到transformer

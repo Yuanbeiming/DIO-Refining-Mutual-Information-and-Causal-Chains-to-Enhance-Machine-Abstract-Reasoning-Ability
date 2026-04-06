@@ -1281,7 +1281,14 @@ class ViT_reverse_with_cls(nn.Module):
  
         self.input_transformer = value_Transformer(dim, patch_dim, 1, heads, dim_head, patch_dim, dropout)
         
-         
+        # if depth >= 2:
+            
+        #     self.transformer = Transformer(patch_dim, depth - 1, heads, int(patch_dim/heads), patch_dim, dropout)
+            
+        # else:
+            
+        #     self.transformer = nn.Identity()
+            
             
         self.transformer = Transformer(patch_dim, depth - 1, heads, dim_head, patch_dim, dropout) if depth > 1 else nn.Identity()
  
@@ -1320,20 +1327,31 @@ class ViT_reverse_with_cls(nn.Module):
         # MLP
         return x 
     
-    def random_drop_vectors(self, x, min_drop=0, max_drop=8):
+    def add_noise_last16(x, min_noise=1, max_noise=8, noise_scale=0.1, zero_padding_p = 0.3):
         b, s, d = x.shape
         device = x.device
         
-        # 每个batch随机丢弃个数
-        drop_count = torch.randint(min_drop, max_drop + 1, (b,), device=device)
+        # 每个batch随机决定加噪个数
+        count = torch.randint(min_noise, max_noise + 1, (b,), device=device)
         
-        # 随机排名：排名 < drop_count 的位置被丢弃
-        ranks = torch.rand(b, s, device=device).argsort(dim=1).argsort(dim=1)
-        drop_mask = (ranks < drop_count.unsqueeze(1)).unsqueeze(-1).expand(-1, -1, d)
+        zero_padding = (torch.rand(b, device=device) > zero_padding_p).float()
         
-        # 丢弃位置填0（或用其他填充策略）
-        return x.masked_fill(drop_mask, 0)
-        #return torch.where(drop_mask, torch.randn(b, s, d, device=device), x), drop_mask
+        count = count * zero_padding
+        
+        # 在后16个位置(16-31)中随机选
+        rand = torch.rand(b, 16, device=device)
+        ranks = rand.argsort(dim=1).argsort(dim=1)  # 排名
+        
+        # 局部mask (b, 16)
+        mask_local = ranks < count.unsqueeze(1)
+        
+        # 拼成全局mask (b, 32)
+        mask = torch.zeros(b, 32, dtype=torch.bool, device=device)
+        mask[:, 16:] = mask_local  # 后16位置
+        
+        # 加噪
+        noise = torch.randn_like(x) * noise_scale
+        return torch.where(mask.unsqueeze(-1).expand(-1, -1, d), x + noise, x), count
 
 
 class Mixed_gussan(nn.Module):

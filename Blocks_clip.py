@@ -1258,7 +1258,7 @@ class ViT_reverse_with_cls(nn.Module):
         num_patches = h* w
         
         
-        num_cls = num_patches
+        self.num_cls = num_cls = num_patches
 
         # patch维度
         patch_dim = channels * patch_height * patch_width
@@ -1313,7 +1313,7 @@ class ViT_reverse_with_cls(nn.Module):
         x += self.pos_embedding[:, :n + self.num_cls]
         
         if self.training and np.random.rand() < 0.33: 
-            x = self.random_drop_vectors(x, max_drop=int(x.shape[1]/4) )
+            x = self.add_noise_to_patch(x, max_drop=int(x.shape[1]/4) )
         # dropout
         x = self.dropout(x)
         # 输入到transformer
@@ -1327,7 +1327,7 @@ class ViT_reverse_with_cls(nn.Module):
         # MLP
         return x 
     
-    def add_noise_last16(x, min_noise=1, max_noise=8, noise_scale=0.1, zero_padding_p = 0.3):
+    def add_noise_to_patch(self, x, min_noise=1, max_noise=8, noise_scale=0.1, zero_padding_p = 0.3):
         b, s, d = x.shape
         device = x.device
         
@@ -1339,15 +1339,15 @@ class ViT_reverse_with_cls(nn.Module):
         count = count * zero_padding
         
         # 在后16个位置(16-31)中随机选
-        rand = torch.rand(b, 16, device=device)
+        rand = torch.rand(b, self.num_cls, device=device)
         ranks = rand.argsort(dim=1).argsort(dim=1)  # 排名
         
         # 局部mask (b, 16)
         mask_local = ranks < count.unsqueeze(1)
         
         # 拼成全局mask (b, 32)
-        mask = torch.zeros(b, 32, dtype=torch.bool, device=device)
-        mask[:, 16:] = mask_local  # 后16位置
+        mask = torch.zeros(b, self.num_cls + self.num_cls, dtype=torch.bool, device=device)
+        mask[:, self.num_cls:] = mask_local  # 后16位置
         
         # 加噪
         noise = torch.randn_like(x) * noise_scale

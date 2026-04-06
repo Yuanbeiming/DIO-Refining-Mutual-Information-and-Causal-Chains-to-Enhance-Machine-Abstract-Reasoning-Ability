@@ -1226,7 +1226,7 @@ class ViT_reverse_aux_linear(nn.Module):
         x = x + self.pos_embedding[:, :n]
         
         if self.training and np.random.rand() < 0.5: 
-            x = self.random_drop_vectors(x)
+            x = self.random_drop_vectors(x, max_drop=int(x.shape[1]/4) )
         # dropout
         x = self.dropout(x)
         # 输入到transformer

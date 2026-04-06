@@ -1281,13 +1281,6 @@ class ViT_reverse_with_cls(nn.Module):
  
         self.input_transformer = value_Transformer(dim, patch_dim, 1, heads, dim_head, patch_dim, dropout)
         
-        # if depth >= 2:
-            
-        #     self.transformer = Transformer(patch_dim, depth - 1, heads, int(patch_dim/heads), patch_dim, dropout)
-            
-        # else:
-            
-        #     self.transformer = nn.Identity()
             
             
         self.transformer = Transformer(patch_dim, depth - 1, heads, dim_head, patch_dim, dropout) if depth > 1 else nn.Identity()
@@ -1312,13 +1305,13 @@ class ViT_reverse_with_cls(nn.Module):
         # print(x)
         x += self.pos_embedding[:, :n + self.num_cls]
         
-        if self.training: 
-            x = self.add_noise_to_patch(x, max_noise=int(x.shape[1]/4) )
+        #if self.training: 
+            #x = self.add_noise_to_patch(x, max_noise = int(x.shape[1]/2) - 1, noise_scale=5, zero_padding_p = 0.8 )
         # dropout
         x = self.dropout(x)
         # 输入到transformer
         
-        x = self.input_transformer(x)
+        x = self.input_transformer(x)#[:,:self.num_cls]
         x = self.transformer(x)[:,:self.num_cls]
         
         
@@ -1327,7 +1320,7 @@ class ViT_reverse_with_cls(nn.Module):
         # MLP
         return x 
     
-    def add_noise_to_patch(self, x, min_noise=1, max_noise=8, noise_scale=5, zero_padding_p = 0.5):
+    def add_noise_to_patch(self, x, min_noise=1, max_noise=8, noise_scale=5, zero_padding_p = 0.3):
         b, s, d = x.shape
         device = x.device
         
@@ -1846,6 +1839,206 @@ class VectorQuantizerEMA_multi_head_revival(nn.Module):
 
     def embed_code(self, embed_id, h):
         return F.embedding(embed_id, self.embed[h].t())
+    
+    
+class VectorQuantizerEMA_multi_head_revival_with_recored(nn.Module):
+    def __init__(self, n_embed, dim, num_head=4, beta=None, decay=0.99, eps=1e-5, vq_loss_type='mae', num_positions=16, MAX_sample = 1920e4):
+        super().__init__()
+        self.dim = dim
+        self.n_embed = n_embed
+        self.num_head = num_head
+        self.decay = decay
+        self.eps = eps
+        assert dim % num_head == 0, "dim must be divisible by num_head"
+        self.head_dim = dim // num_head
+
+        embed = F.normalize(torch.randn(num_head, self.head_dim, n_embed, requires_grad = False), p=2, dim=1)
+        self.register_buffer("embed", embed)
+        self.register_buffer("cluster_size", torch.zeros(num_head, n_embed))
+        self.register_buffer("embed_avg", embed.clone())
+        self.vq_loss_f = vq_loss_type
+        
+        # ✅ 新增：位置-码本聚类统计表 (num_head, s, n_embed)
+        self.register_buffer("cluster_map", torch.zeros(num_head, num_positions, n_embed, dtype=torch.long))
+        self.register_buffer("sample_count", torch.tensor(0, dtype=torch.long))
+        self.MAX_sample = MAX_sample
+        self.register_buffer("map_sealed", torch.tensor(False))  # 封存标志
+
+        # ✅ 新增：复活超参
+        self.revival_interval = 1
+        self.dead_threshold = 1.0
+        self.register_buffer("step_count", torch.tensor(0, dtype=torch.long))
+        
+    @torch.no_grad()
+    def _update_cluster_map(self, input_heads, embed_ind_heads):
+        """
+        更新聚类统计表
+        input_heads: (b, s, num_head, head_dim)
+        embed_ind_heads: list of (b, s) 每个头的聚类索引
+        """
+        if self.map_sealed:
+            return
+            
+        b, s, _, _ = input_heads.shape
+        actual_samples = b  # 当前batch的样本数
+        
+        # 如果即将超过上限，只统计部分样本（可选，确保精确等于上限）
+        remaining = self.MAX_sample - self.sample_count.item()
+        if remaining <= 0:
+            self.map_sealed.fill_(True)
+            print(f"[VQL] Cluster map sealed at {self.sample_count.item()} samples")
+            return
+            
+        # 对每个头分别统计
+        for h in range(self.num_head):
+            indices = embed_ind_heads[h]  # (b, s)
+            # 转为 one-hot 并累加到对应位置
+            # one_hot shape: (b, s, n_embed)
+            one_hot = F.one_hot(indices, self.n_embed).long()
+            # 按batch求和，累加到全局统计表 (s, n_embed)
+            self.cluster_map[h] += one_hot.sum(dim=0)
+        
+        self.sample_count += actual_samples
+        
+        # 检查是否达到封存阈值
+        if self.sample_count >= self.MAX_sample:
+            self.map_sealed.fill_(True)
+            print(f"[VQL] Cluster map sealed at {self.sample_count.item()} samples (MAX={self.MAX_sample})")
+
+    # ✅ 新增：复活函数
+    @torch.no_grad()
+    def _revive_dead_codes(self, input_heads):
+        B, S, _, _ = input_heads.shape
+        for h in range(self.num_head):
+            dead_ids = (self.cluster_size[h] < self.dead_threshold).nonzero(as_tuple=True)[0]
+            n_dead = dead_ids.numel()
+            if n_dead == 0:
+                continue
+    
+            head_input = input_heads[:, :, h, :].reshape(-1, self.head_dim)   # [N, head_dim]
+            n_avail = head_input.size(0)
+    
+            # 不重复采样：最多复活 n_avail 个
+            n_resample = min(n_dead, n_avail)
+            rand_idx = torch.randperm(n_avail, device=head_input.device)[:n_resample]
+            revive_vec = head_input[rand_idx]                # [n_resample, head_dim]
+    
+            # 只替换前 n_resample 个死亡码
+            self.embed[h][:, dead_ids[:n_resample]] = revive_vec.t()
+            self.cluster_size[h][dead_ids[:n_resample]] = self.dead_threshold
+            self.embed_avg[h][:, dead_ids[:n_resample]] = revive_vec.t() * self.dead_threshold
+
+    # ------------ 你原来的 forward 一字未动 ------------
+    def forward(self, input):
+        b, s, d = input.shape
+        assert d == self.num_head * self.head_dim, "Input dim mismatch"
+        input_heads = input.view(b, s, self.num_head, self.head_dim)
+        quantize_heads, embed_ind_heads = [], []
+
+        for h in range(self.num_head):
+            head_input = input_heads[:, :, h, :].contiguous().view(-1, self.head_dim)
+            dist = (
+                head_input.pow(2).sum(1, keepdim=True)
+                - 2 * head_input @ self.embed[h]
+                + self.embed[h].pow(2).sum(0, keepdim=True)
+            )
+            _, embed_ind = (-dist).max(1)
+            embed_onehot = F.one_hot(embed_ind, self.n_embed).type(head_input.dtype)
+            quantize_h = F.embedding(embed_ind, self.embed[h].t()).view(b, s, 1, self.head_dim)
+            quantize_heads.append(quantize_h)
+            embed_ind_heads.append(embed_ind.view(b, s, 1))
+
+        quantize = torch.cat(quantize_heads, dim=2).view(b, s, d)
+        embed_ind = torch.cat(embed_ind_heads, dim=2)
+        
+        # ✅ 在训练时更新聚类统计表（无论是否decay<1，只要训练就统计）
+        if self.training and not self.map_sealed:
+            self._update_cluster_map(input_heads, embed_ind_heads)
+
+        if self.training and self.decay < 1:
+            # ✅ 新增：复活检查
+            self.step_count += 1
+            if self.training and (self.step_count % self.revival_interval) == 0:
+                self._revive_dead_codes(input_heads)
+                
+            for h in range(self.num_head):
+                head_input = input_heads[:, :, h, :].contiguous().view(-1, self.head_dim)
+                dist = (
+                    head_input.pow(2).sum(1, keepdim=True)
+                    - 2 * head_input @ self.embed[h]
+                    + self.embed[h].pow(2).sum(0, keepdim=True)
+                )
+                dist = F.gumbel_softmax(dist, tau=1.6, dim=-1)
+                _, embed_ind = (-dist).max(1)
+                embed_onehot = F.one_hot(embed_ind, self.n_embed).type(head_input.dtype)
+                embed_onehot_sum = embed_onehot.sum(0)
+                embed_sum = head_input.t() @ embed_onehot
+                distri.all_reduce(embed_onehot_sum)
+                distri.all_reduce(embed_sum)
+                self.cluster_size[h].data.mul_(self.decay).add_(embed_onehot_sum, alpha=1 - self.decay)
+                self.embed_avg[h].data.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
+                n = self.cluster_size[h].sum()
+                cluster_size = (self.cluster_size[h] + self.eps) / (n + self.n_embed * self.eps) * n
+                embed_normalized = self.embed_avg[h] / cluster_size.unsqueeze(0)
+                self.embed[h].data.copy_(embed_normalized)
+        if self.vq_loss_f == 'huber' or self.vq_loss_f == 'Huber':
+            diff = F.huber_loss(input, quantize.detach(), reduction='mean', delta=0.1)
+        elif self.vq_loss_f == 'mae' or self.vq_loss_f == 'MAE':
+            diff = F.l1_loss(input, quantize.detach())
+        else:
+            diff = F.mse_loss(input, quantize.detach())
+        quantize = input + (quantize - input).detach()
+        return quantize, diff, embed_ind
+
+    def embed_code(self, embed_id, h):
+        return F.embedding(embed_id, self.embed[h].t())
+    
+    # 查询与导出接口
+    def get_cluster_map(self, normalize=True):
+        """
+        获取聚类统计表
+        normalize: 是否按位置归一化（转为频率而非次数）
+        返回: (num_head, s, n_embed) 的张量
+        """
+        map_data = self.cluster_map.float()
+        if normalize and self.sample_count > 0:
+            # 每个位置独立归一化
+            map_data = map_data / map_data.sum(dim=-1, keepdim=True).clamp(min=1)
+        return map_data
+    
+    def get_position_dominant_codes(self, topk=3):
+        """
+        获取每个位置的主导码本（Top-K频率）
+        返回: (num_head, s, topk) 的索引
+        """
+        # 按频次排序，返回topk索引
+        values, indices = self.cluster_map.topk(topk, dim=-1)
+        return indices
+    
+    def export_cluster_analysis(self, save_path=None):
+        """
+        导出聚类分析报告
+        """
+        analysis = {
+            'map_shape': self.cluster_map.shape,
+            'total_samples': self.sample_count.item(),
+            'sealed': self.map_sealed.item(),
+            'sparsity': (self.cluster_map == 0).float().mean().item(),  # 零项比例
+            'position_entropy': self._compute_position_entropy(),
+            'dominant_codes_per_pos': self.get_position_dominant_codes(topk=1).squeeze(-1)
+        }
+        if save_path:
+            torch.save(analysis, save_path)
+        return analysis
+    
+    def _compute_position_entropy(self):
+        """计算每个位置的使用熵（衡量多样性，越低越集中）"""
+        probs = self.get_cluster_map(normalize=True)  # (num_head, s, n_embed)
+        entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)  # (num_head, s)
+        return entropy.mean(dim=-1)  # 每个头的平均熵
+
+    # ... 保持 embed_code 和 _revive_dead_codes 不变 ...
+    
 
 class VectorQuantizer(nn.Module):
 

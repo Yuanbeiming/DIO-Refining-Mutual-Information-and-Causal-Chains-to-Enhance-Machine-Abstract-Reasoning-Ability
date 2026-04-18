@@ -1164,6 +1164,70 @@ class ViT_reverse(nn.Module):
         # MLP
         return x  
     
+from UNetDecoder import UNetDecoder
+    
+class ViT_reverse_aux_cnn(nn.Module):
+    def __init__(self, *, image_size, patch_size,  dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
+        #dim: lengh of token ，depth： depth of tranformer, dim_head: dim of signle head, mlp_dim: dim of mlp of transfomer
+        super().__init__()
+        image_height, image_width = image_size if isinstance(image_size, tuple) or  isinstance(image_size, list) else pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+     
+ 
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+        # patch数量
+        
+        h, w = (image_height // patch_height), (image_height // patch_height)
+        num_patches = h* w
+        # patch维度
+        patch_dim = channels * patch_height * patch_width
+        
+        # 定义块嵌入
+        self.name = 'ViT_reverse'
+        self.to_patch_embedding = Rearrange('b (m n) (c p1 p2) -> b c (m p1) (n p2)', p1 = patch_height, p2 = patch_width, c = channels, m = image_height // patch_height, n = image_width // patch_width)
+            
+        # )
+        # 定义位置编码
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim))
+        # 定义类别向量
+
+        self.dropout = nn.Dropout(emb_dropout)
+ 
+        self.input_transformer = value_Transformer(dim, patch_dim, 1, heads, dim_head, patch_dim, dropout)
+        
+
+        self.transformer = Transformer(patch_dim, depth - 1, heads, dim_head, patch_dim, dropout) if depth > 1 else nn.Identity()
+ 
+ 
+        self.to_latent = nn.Identity()
+        # 定义MLP
+
+    # ViT前向流程
+    def forward(self, img):
+        # 块嵌入
+        
+        x  = img
+
+        b, n, _ = x.shape
+        
+
+
+        # 追加位置编码
+        # print(x)
+        x = x + self.pos_embedding[:, :n]
+        # dropout
+        x = self.dropout(x)
+        # 输入到transformer
+        
+        x = self.input_transformer(x)
+        x = self.transformer(x)
+        
+        
+        x = self.to_patch_embedding(x)
+        # x_ = x.mean(dim = 1, keepdim = True) if self.pool == 'mean' else x[:,1:(n + 1)]
+        # MLP
+        return x 
+    
 class ViT_reverse_aux_linear(nn.Module):
     def __init__(self, *, image_size, patch_size,  dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
         #dim: lengh of token ，depth： depth of tranformer, dim_head: dim of signle head, mlp_dim: dim of mlp of transfomer
@@ -1187,7 +1251,9 @@ class ViT_reverse_aux_linear(nn.Module):
         # 定义块嵌入
         self.name = 'ViT_reverse'
         self.to_patch_embedding = Rearrange('b (m n) (c p1 p2) -> b c (m p1) (n p2)', p1 = patch_height, p2 = patch_width, c = channels, m = image_height // patch_height, n = image_width // patch_width)
-            
+        
+        
+        latent_dim = channels*image_height*image_width/5
         # )
         # 定义位置编码
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim))
@@ -1201,10 +1267,14 @@ class ViT_reverse_aux_linear(nn.Module):
         self.transformer = Transformer(patch_dim, depth - 1, heads, dim_head, patch_dim, dropout) if depth > 1 else nn.Identity()
  
     
-        self.lin = nn.Sequential(Rearrange('b s d -> b (s d)'),
+        self.lin = nn.Sequential(Rearrange('b c h w -> b (c h w)'),
                                  nn.GELU(),
-                                 nn.Linear(patch_dim*m*n, patch_dim*m*n),
-                                 Rearrange('b (s d) -> b s d', s=(m*n))
+                                 nn.BatchNorm1d(image_height*image_width*channels),
+                                 nn.Linear(image_height*image_width*channels, latent_dim),
+                                 nn.GELU(),
+                                 nn.BatchNorm1d(latent_dim),
+                                 nn.Linear(latent_dim, image_height*image_width*channels),
+                                 Rearrange('b (c h w) -> b c h w', c = channels, h = image_height, w = image_width)
             
             )
  
@@ -1232,12 +1302,13 @@ class ViT_reverse_aux_linear(nn.Module):
         x = self.input_transformer(x)
         x = self.transformer(x)
         
-        x = self.lin(x)
-        
         x = self.to_patch_embedding(x)
+        
+        out = self.lin(x)
+        
         # x_ = x.mean(dim = 1, keepdim = True) if self.pool == 'mean' else x[:,1:(n + 1)]
         # MLP
-        return x  
+        return x + out
     
 
     
@@ -1842,13 +1913,14 @@ class VectorQuantizerEMA_multi_head_revival(nn.Module):
     
     
 class VectorQuantizerEMA_multi_head_revival_with_recored(nn.Module):
-    def __init__(self, n_embed, dim, num_head=4, beta=None, decay=0.99, eps=1e-5, vq_loss_type='mae', num_positions=16, MAX_sample = 1920e4):
+    def __init__(self, n_embed, dim, num_head=4, beta=None, decay=0.99, eps=1e-5, vq_loss_type='mae', num_positions=16, MAX_sample = 1920e4, is_gumbel = False):
         super().__init__()
         self.dim = dim
         self.n_embed = n_embed
         self.num_head = num_head
         self.decay = decay
         self.eps = eps
+        self.is_gumbel = is_gumbel
         assert dim % num_head == 0, "dim must be divisible by num_head"
         self.head_dim = dim // num_head
 
@@ -1942,7 +2014,10 @@ class VectorQuantizerEMA_multi_head_revival_with_recored(nn.Module):
                 - 2 * head_input @ self.embed[h]
                 + self.embed[h].pow(2).sum(0, keepdim=True) #b*s, d × d, n
             )
-            _, embed_ind = (-dist).max(1) #b*s
+            if self.is_gumbel and self.training:
+                _, embed_ind = F.gumbel_softmax(-dist, tau=1.0, hard=True, dim=-1).max(1)
+            else:
+                _, embed_ind = (-dist).max(1) #b*s
             embed_onehot = F.one_hot(embed_ind, self.n_embed).type(head_input.dtype)
             quantize_h = F.embedding(embed_ind, self.embed[h].t()).view(b, s, 1, self.head_dim)
             quantize_heads.append(quantize_h)
@@ -2166,7 +2241,7 @@ class GracefulSaver:
     def restore_handler(self):
         """恢复原始信号处理（如需要）"""
         signal.signal(signal.SIGINT, self.original_handler)
-
+https://github.com/Yuanbeiming/DIO-Refining-Mutual-Information-and-Causal-Chains-to-Enhance-Machine-Abstract-Reasoning-Ability/blob/main/Blocks_clip.py
 
         
 def print_lr_dict(optimizer, model=None):

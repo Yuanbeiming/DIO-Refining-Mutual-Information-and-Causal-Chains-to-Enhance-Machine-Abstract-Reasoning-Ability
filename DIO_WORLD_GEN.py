@@ -242,36 +242,114 @@ class Cross_Transformer(nn.Module):
         return x
 
         
+
+
 class To_image(nn.Module):
-    def __init__(self, in_ch=1, hidden_ch=8):
+    def __init__(self, latent_dim = 1280):
         super().__init__()
-        # 主路径：3x3小核精炼
+        
+        in_feature = 6400
+        
+        self.lin = nn.Sequential(Rearrange('b c h w -> b (c h w)'),
+                                 nn.Linear(in_feature, latent_dim),
+                                 nn.BatchNorm1d(latent_dim),
+                                 nn.GELU(),
+                                 nn.Linear(latent_dim, in_feature),
+                                 Rearrange('b (c h w) -> b c h w', c = 1, h = 80, w = 80)
+            
+            )
+
+
+        
+    def forward(self, x):
+        out = self.lin(x)
+        
+        return out + x
+    
+""" 
+class To_image_cnn(nn.Module):
+    def __init__(self, in_ch=1, hidden_ch=4, gn_ch = 4):
+        super().__init__()
+        
         self.conv1 = nn.Conv2d(in_ch, hidden_ch, 3, padding=1)
-        self.conv2 = nn.Conv2d(hidden_ch, in_ch, 3, padding=1)
+        self.gn = nn.GroupNorm(gn_ch, hidden_ch)  # 16%8=0
+        self.conv2 = nn.Conv2d(hidden_ch + in_ch, in_ch, 3, padding=1)
         
-        # 跳跃连接
-        # self.skip = nn.Conv2d(in_ch, in_ch, 1)
-        
-        # 初始化conv2接近0，训练初期近似恒等映射
+        # 全零初始化
+        nn.init.zeros_(self.conv1.weight)
+        nn.init.zeros_(self.conv1.bias)
         nn.init.zeros_(self.conv2.weight)
         nn.init.zeros_(self.conv2.bias)
         
     def forward(self, x):
-        
-        
-        out = F.leaky_relu(self.conv1(x), 0.2)
+        out = self.conv1(x)
+        out = self.gn(out)
+        out = F.gelu(out)
+        out = torch.cat([x, out], dim=1)
         out = self.conv2(out)
         
         return out + x
-
-
+        
+"""    
+class To_image_cnn(nn.Module):
+    def __init__(self, in_ch=1, hidden_ch=4, gn_ch = 4):
+        super().__init__()
+        
+        # 下采样: 80x80 -> 40x40
+        self.conv1 = nn.Conv2d(in_ch, hidden_ch, 4, stride=2, padding=1)
+        self.gn1 = nn.GroupNorm(gn_ch, hidden_ch)
+        
+        # 40x40 空间处理
+        self.conv2 = nn.Conv2d(hidden_ch, hidden_ch, 3, padding=1)
+        self.gn2 = nn.GroupNorm(gn_ch, hidden_ch)
+        
+        # 上采样: 40x40 -> 80x80
+        self.conv3 = nn.ConvTranspose2d(hidden_ch, hidden_ch, 4, stride=2, padding=1)
+        self.gn3 = nn.GroupNorm(gn_ch, hidden_ch)
+        
+        # 输出层，融合原始输入
+        self.conv4 = nn.Conv2d(hidden_ch + in_ch, in_ch, 3, padding=1)
+        
+        # 输出层初始化为零（近似恒等）
+        nn.init.zeros_(self.conv1.weight)
+        nn.init.zeros_(self.conv1.bias)
+        nn.init.zeros_(self.conv2.weight)
+        nn.init.zeros_(self.conv2.bias)
+        nn.init.zeros_(self.conv3.weight)
+        nn.init.zeros_(self.conv3.bias)
+        nn.init.zeros_(self.conv4.weight)
+        nn.init.zeros_(self.conv4.bias)
+        
+    def forward(self, x):
+        identity = x
+        
+        # 编码路径
+        h = self.conv1(x)
+        h = self.gn1(h)
+        h = F.gelu(h)
+        
+        h = self.conv2(h)
+        h = self.gn2(h)
+        h = F.gelu(h)
+        
+        # 解码上采样
+        h = self.conv3(h)
+        h = self.gn3(h)
+        h = F.gelu(h)
+        
+        # 融合原始输入，残差输出
+        h = torch.cat([h, identity], dim=1)
+        out = self.conv4(h)
+        
+        return out + identity
+   
 
 class raven_clip(nn.Module):
-    def __init__(self, *args, num_aux_candidates =  4):
+    def __init__(self, *args, num_aux_candidates =  0):
         super(raven_clip,self).__init__()
 
         #self.num_embeddings = 8192
-        self.num_embeddings = 2**13
+        self.num_embeddings = 2**14
 
         
 
@@ -287,10 +365,10 @@ class raven_clip(nn.Module):
             num_depth = 3
             self.low_dim = 128
 
-        vql_heads = 1
+        vql_heads = 2
 
 
-        self.name = 'DIO_WORLD_sn_Replace_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
+        self.name = 'DIO_WORLD_sn_continue_Replace_single_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
             
         if dropout:
             _dropout = 0.1
@@ -355,9 +433,15 @@ class raven_clip(nn.Module):
         self.temperature = temperature
 
         
-        self.num_rule = 2
+        self.num_rule = 4
 
-        
+        is_mix = True
+
+        is_cnn = True
+
+        self.is_dou = False 
+
+        if self.is_dou: self.name = 'DIO_WORLD_sn_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
             
         self.vit = nn.Sequential(ViT(image_size = size, 
                                    patch_size = patch,  
@@ -378,63 +462,61 @@ class raven_clip(nn.Module):
 
         )#b*16, 16, dimS
         
-        #self.discrimnator = SinkhornDistance(eps=0.1, max_iter = 100, reduction='mean')
-        self.j_position = nn.Parameter(torch.randn(1, self.w, self.low_dim))
+        #self.j_position = nn.Parameter(torch.randn(1, self.w, self.low_dim))
 
-        num_decoder_depth = num_depth*2
-        
-        if_cnn = False
-        
-        self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
-                                      # Mean(dim = -2, keepdim = True),
-                                          ViT_reverse(#words = self.w, 
-                                                               
-                                                                image_size = 80,  
-                                                               
-                                                                patch_size = 20,
-                                                               
-                                                                channels = 1,
-                                                               
-                                                                dim = self.low_dim, 
-                                                               
-                                                                depth = num_decoder_depth,
-                                                                
-                                                                heads = num_head,
-                                                                
-                                                                mlp_dim = self.low_dim,
-                                                                
-                                                                dim_head = int(self.low_dim/num_head),
-                                                                
-                                          ), 
-                                          To_image() if if_cnn else nn.Identity(),
-                                          Sigmoid_up()
-                                          
-                                          
-                                          )
+        num_decoder_depth = num_depth*2-1
+          
+        if self.is_dou:
+            self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
+                                              ViT_reverse(#words = self.w, 
+                                                                    image_size = 80,  
+                                                                   
+                                                                    patch_size = 20,
+                                                                   
+                                                                    channels = 1,
+                                                                   
+                                                                    dim = self.low_dim, 
+                                                                   
+                                                                    depth = num_decoder_depth,
+                                                                    
+                                                                    heads = num_head,
+                                                                    
+                                                                    mlp_dim = self.low_dim,
+                                                                    
+                                                                    dim_head = int(self.low_dim/num_head),
+                                                                    
+                                              ), 
+                                              To_image(640) if is_mix else nn.Identity(),
+                                              #To_image(640) if is_mix else nn.Identity(),
+                                              To_image_cnn() if is_cnn else nn.Identity(),
+                                              Sigmoid_up()
+                                              )
         
         self.decoder_down = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
-                                      # Mean(dim = -2, keepdim = True),
-                                          ViT_reverse(#words = self.w, 
-                                                               
-                                                                image_size = 80,  
-                                                               
-                                                                patch_size = 20,
-                                                               
-                                                                channels = 1,
-                                                               
-                                                                dim = self.low_dim, 
-                                                               
-                                                                depth = num_decoder_depth,
+                                              ViT_reverse(#words = self.w, 
+                                                                    image_size = 80,  
+                                                                   
+                                                                    patch_size = 20,
+                                                                   
+                                                                    channels = 1,
+                                                                   
+                                                                    dim = self.low_dim, 
+                                                                   
+                                                                    depth = num_decoder_depth,
+                                                                    
+                                                                    heads = num_head,
+                                                                    
+                                                                    mlp_dim = self.low_dim,
+                                                                    
+                                                                    dim_head = int(self.low_dim/num_head),
                                                                 
-                                                                heads = num_head,
-                                                                
-                                                                mlp_dim = self.low_dim,
-                                                                
-                                                                dim_head = int(self.low_dim/num_head),
-                                                                
-                                          ),
-                                          To_image() if if_cnn else nn.Identity(),
-                                          Sigmoid_down())
+                                                ),
+                                                To_image(1280) if is_mix else nn.Identity(),
+                                                #To_image(1280) if is_mix else nn.Identity(),
+                                                To_image_cnn(hidden_ch = 4, gn_ch = 4) if is_cnn else nn.Identity(),
+                                                Sigmoid_down() if self.is_dou else nn.Sigmoid()
+                                                
+                                                )
         
         
         
@@ -492,18 +574,54 @@ class raven_clip(nn.Module):
                             
                             Rearrange('(b m s n) d -> b m (s n d)', s = self.w, m = num_candidates, n = 1),
                             Mean(dim = -1))
-
         
-        self.vql = VectorQuantizerEMA_multi_head_revival_with_recored(self.num_embeddings,
-			                                        self.low_dim,
-			                                        vql_heads,
-			                                        self.beta,
-			                                        1,
-			                                        vq_loss_type = 'mse')
+        
+    
+
+        self.vql_gumbel = True
+        self.vql = VectorQuantizerEMA_multi_head_revival_with_recored(n_embed = self.num_embeddings,
+			                                        dim = self.low_dim,
+			                                        num_head = vql_heads,
+			                                        beta = self.beta,
+			                                        #decay = 0.99995,
+			                                        decay = 1,
+			                                        vq_loss_type = 'mse',
+			                                        num_positions = self.w,
+			                                        MAX_sample = 1920e4,
+                                                    is_gumbel= self.vql_gumbel)
         self._add_spectral_norm()
-        self.replace_x = 1
-        self.max_replace = 10
+        self.replace_x = 0
+        self.max_replace = int(self.w/2)
+        self.noise_x = 1.0
 ################################################################################################################################################################################################
+        self.pretrain = True
+
+        if self.pretrain:
+            
+           
+
+            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_GENN_CNN_best.pt', map_location = 'cpu')
+            #98.55% Spectral normalization almost inevitably degrades model performance.
+            for name, param in self.named_parameters():
+                if name in pretrained_params:
+                        param.data = pretrained_params[name].data
+                     
+
+                else:
+                        print(f"Warning: Parameter '{name}' not found in pretrained dict.")
+                    
+               
+   
+            for name, buffer in self.named_buffers():
+                if name in pretrained_params:
+                    
+                         buffer.data.copy_(pretrained_params[name].data)
+
+                else:
+                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
+                    
+                    
+              
                 
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
@@ -511,6 +629,8 @@ class raven_clip(nn.Module):
             print('*'*100)
             print('Worning! embed is fixed')
         print('num_aux_candidates:', num_aux_candidates)
+        print('noise_x is', str(self.noise_x))
+        if self.vql_gumbel: print('Gumbel sampling is employed for centroid selection in GMM.')
         
 
     def _add_spectral_norm(self):
@@ -519,44 +639,19 @@ class raven_clip(nn.Module):
         exclude_names = {'vit', 'decoder_up', 'decoder_down'}
         
         for name, module in self.named_modules():
-            # 跳过模型本身（name为空）和排除模块及其子模块
+           
             if not name:
                 continue
             
-            # 检查路径中是否包含排除的模块名（如 vit.transformer 会被排除）
+            
             if any(excluded in name.split('.') for excluded in exclude_names):
                 continue
             
-            # 只为 Linear 和 Conv2d 添加谱归一化
+            
             if isinstance(module, (nn.Linear, nn.Conv2d)):
                 spectral_norm(module)
                 print(f'add sn to: {name}')
 
-    def sample_from_codebook(self, b, k = None):
-        
-        with torch.no_grad():
-            embed = self.vql.embed  # [H, D, N]
-            H, D, N = embed.shape
-            if k is None:
-                k = self.num_aux_candidates  # 采样数K
-            w = self.w  # patch数量(16)
-
-            rand_idx = torch.randint(
-                0, N, 
-                (b, k, w, H), 
-                device=embed.device
-            )
-            
-            embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
-            
-            head_offsets = torch.arange(H, device=embed.device).view(1, 1, 1, H) * N
-            global_idx = rand_idx + head_offsets  # [b, k, w, H]
-            
-            samples = F.embedding(global_idx, embed_flat)
-            
-            samples = samples.reshape(b, k, w, H * D)
-            
-        return samples.detach()  # [b, k, w, low_dim]
        
     
     def forward_cross_attention(self,qkv):
@@ -595,70 +690,75 @@ class raven_clip(nn.Module):
 
         x_recon, vq_loss, _ = self.vql(x)
         
-        x_recon_replaced, self.replace_x = self.random_replace(x = x_recon.detach(), max_replace=self.max_replace)
-        #x_recon_replaced, _ = self.random_replace(x = x_recon.detach(), max_replace=self.max_replace)
-        
-        assert self.replace_x < 1.0
-    
         #x_recon, vq_loss = x, torch.zeros(1, device = x.device).sum()
         
         x_recon = x_recon.view(b, n, self.w, self.low_dim)
+        
+        x = x.reshape(b,n,-1,self.low_dim)
+        
+        bias = bias.reshape(b,n,-1,self.low_dim)
 
-        x_recon_replaced = x_recon_replaced.view(b, n, self.w, self.low_dim)
+        noise_x = self.noise_x
+        
+        
+        if self.is_dou: recon_continue_up = self.decoder_up(x + torch.randn_like(x_recon)*noise_x if self.training else x)
+        
+        
+        recon_continue_down =             self.decoder_down(x + torch.randn_like(x_recon)*noise_x if self.training else x)
+        
+        
+        if self.is_dou: recon_continue_bias_up = self.decoder_up(x + bias + torch.randn_like(x_recon)*max(noise_x - 1, 0) if self.training else x)
+        
+        
+        recon_continue_bias_down =             self.decoder_down(x + bias + torch.randn_like(x_recon)*max(noise_x - 1, 0) if self.training else x)
+        
 
         if self.training:
             point = int(b/2)
     
-            x = torch.cat([x.reshape(b,n,-1,self.low_dim)[:point], x_recon[point:]], dim = 0)
-        
-        else:
-            x = x.reshape(b,n,-1,self.low_dim)
-        
-        #x = x.reshape(b,n,-1,self.low_dim)
-
-
-        bias = bias.reshape(b,n,-1,self.low_dim)
+            x = torch.cat([x[:point], 
+                           torch.cat([x[point:,:8], x_recon[point:,8:]], dim = 1)
+                           ], dim = 0)
         
         
         K = self.num_aux_candidates
         
         if K > 0:
-            """
-            point_x = 0 #int(K/2)
-            extra_candidates =                   self.sample_from_codebook(b)[:, :point_x]  # [b, K, 16, dim]
+            
+            point_x = int(K/2)
+            extra_candidates = torch.empty(b, 0, self.w, self.low_dim, device = x.device) if point_x == 0 else self.sample_from_codebook_topk(b, point_x)  # [b, K, 16, dim]
             extra_candidates = torch.cat([extra_candidates, 
-                                          x_recon[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*(K - point_x)*self.w, ))].reshape(b, K - point_x, self.w, self.low_dim)],
+                                          x_recon[:, :8, :].reshape(-1, self.w, self.low_dim)[torch.randint(0, b*8, (b*(K - point_x), ))].reshape(b, K - point_x, self.w, self.low_dim)],
                                          dim = 1)
-            """
-            #extra_candidates = self.sample_from_codebook(b)  # [b, K, 16, dim]
-            extra_candidates = x[:, :8, :].reshape(-1, self.low_dim)[torch.randint(0, b*8*self.w, (b*K*self.w, ))].reshape(b, K, self.w, self.low_dim)
             
-            
-            # extra_bias = torch.randn_like(extra_candidates)
         else:
             extra_candidates = torch.empty(b, 0, 16, self.low_dim, device=x.device)
+            
+        
+        noise_y = max(noise_x - 1, 1)
+        
+        if self.is_dou: recon_up = self.decoder_up(x_recon.detach() + torch.randn_like(x_recon)*noise_y if self.training else x_recon)
         
         
-        recon_bias_up = self.decoder_up(x_recon + bias)
-        
-        recon_bias_down = self.decoder_down(x_recon + bias)
+        recon_down =             self.decoder_down(x_recon.detach() + torch.randn_like(x_recon)*noise_y if self.training else x_recon)# + torch.randn_like(x_recon)*2
 
         
-        recon_up = self.decoder_up(x_recon + torch.randn_like(x_recon) if self.training else x_recon)
+        
+        x_replace = self.random_replace(x = x_recon.detach().reshape(-1, self.w, self.low_dim),
+                                        x_code =  x.reshape(-1, self.w, self.low_dim)
+                                       )[0].reshape(b, n, self.w, self.low_dim)
+
+        if self.is_dou: recon_replace_up = self.decoder_up(x_replace + torch.randn_like(x_replace)*noise_y if self.training else x_recon)
         
         
-        recon_down = self.decoder_down(x_recon + torch.randn_like(x_recon) if self.training else x_recon)
+        recon_replace_down =             self.decoder_down(x_replace + torch.randn_like(x_replace)*noise_y if self.training else x_recon)
+
         
-        
-        recon_replace_up = self.decoder_up(x_recon_replaced + torch.randn_like(x_recon) if self.training else x_recon)
-        
-        
-        recon_replace_down = self.decoder_down(x_recon_replaced + torch.randn_like(x_recon) if self.training else x_recon)
-        
+                                      
 
         x = torch.cat([x, extra_candidates], dim = 1)
-        
-        x = x + self.j_position[None]
+
+
  
         x = self.recat(x)
         
@@ -671,16 +771,28 @@ class raven_clip(nn.Module):
 
         
         out =  map(lambda t: self.tajador(self.forward_cross_attention(t.squeeze(-2))), qkv)
-        
-        
-        # print(out.shape)
-        y = torch.randn(1,1).to(x.device)#self.txt_clip(self.txt_data.to(x.device))
 
-        return *list(map(lambda t: t.mean(dim = 1).squeeze(), qkv)), x.reshape(-1, self.low_dim), \
-            sum(list(out)), y, bias.reshape(-1, self.w, self.low_dim), state, \
-                recon_up, recon_down, recon_bias_up, recon_bias_down, recon_replace_up, recon_replace_down, vq_loss
+        y = torch.randn(1,1).to(x.device)
+
         
-    #"""
+        if self.is_dou:
+
+            return *list(map(lambda t: t.mean(dim = 1).squeeze(), qkv)), x.reshape(-1, self.low_dim), \
+                sum(list(out)), y, bias.reshape(-1, self.w, self.low_dim), state, \
+                     recon_up, recon_down,\
+                             recon_continue_up, recon_continue_down,\
+                                 recon_continue_bias_up, recon_continue_bias_down,\
+                                     recon_replace_up, recon_replace_down, vq_loss
+                                     
+        else:
+            
+            return *list(map(lambda t: t.mean(dim = 1).squeeze(), qkv)), x.reshape(-1, self.low_dim), \
+                sum(list(out)), y, bias.reshape(-1, self.w, self.low_dim), state, \
+                      recon_down,\
+                              recon_continue_down,\
+                                  recon_continue_bias_down,\
+                                      recon_replace_down, vq_loss
+
 
     def my_cov(self, z):
         n = z.shape[0]
@@ -701,53 +813,95 @@ class raven_clip(nn.Module):
         return self.dio_loss(x, idx), (x.argmax(dim = -1) == idx).float().sum() if self.training else (x[:, :8].argmax(dim = -1) == idx).float().sum()
         
     
+    def loss_function_sl(self, *out, target):
+        
+
+
+        
+        keep_rule = (target != 7775)
+        
+        graph = out[0].mean(dim = 1, keepdim = True)# b 9 d
+        
+        # print(graph.shape)
+
+        txt = out[1]
+        
+        loss_1 = 0
+    
+        right = torch.zeros(1).sum().to(graph.device)
+        
+        if keep_rule.float().sum().item() != 0:
+            
+
+            r = F.cosine_similarity(graph[keep_rule,:,None, None], txt[:,None,:], dim = -1).mean(dim = -2) #b 5, t, 7775
+            
+            
+            loss_1 += F.cross_entropy(r.reshape(-1, 7775)/ 1e-6, target[keep_rule, None].expand(-1, r.shape[1]).reshape(-1))
+
+            right = (r.argmax(dim = -1).reshape(-1) == target[keep_rule, None].expand(-1, r.shape[1]).reshape(-1)).float().sum()/r.shape[1]
+
+            """"""
+
+        
+        return loss_1, right, right/keep_rule.sum()
+    
     
     def loss_function(self, *out, target_shape, target_line, idx):
+
         
-        # idx = None
-        x_shape, x_line, z, x, y, bias, state, recon_up, recon_down, recon_bias_up, recon_bias_down, recon_replace_up, recon_replace_down, vq_loss = out
+        if self.is_dou:
+            x_shape, x_line, z, x, y, bias, state, \
+                 recon_up, recon_down, \
+                         recon_continue_up, recon_continue_down, \
+                             recon_continue_bias_up, recon_continue_bias_down, \
+                                 recon_replace_up, recon_replace_down, vq_loss = out
+                            
+        else:
+            x_shape, x_line, z, x, y, bias, state, \
+                 recon_down, \
+                     recon_continue_down, \
+                             recon_continue_bias_down, \
+                                recon_replace_down, vq_loss = out
+            
+                       
+        idx_ = F.one_hot(idx, 8)[:,:,None,None]
+        
+        x_shape = (x_shape[:,:8]*idx_).sum(dim = 1)
+        
+        x_line = (x_line[:,:8]*idx_).sum(dim = 1)
         
  
         y = y.unsqueeze(1)
         
-        # self.replace_x = 1 - (self.max_replace/self.w)
        
-        
-        loss = F.mse_loss(recon_up, state) + F.mse_loss(recon_bias_up, state) +\
-            F.mse_loss(recon_down, state) + F.mse_loss(recon_bias_down, state) +\
-                self.replace_x*F.mse_loss(recon_replace_up, state) + self.replace_x*F.mse_loss(recon_replace_down, state)
 
-        loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + \
-            F.mse_loss(recon_bias_up + recon_bias_down - .5, state) + \
-                self.replace_x*F.mse_loss(recon_replace_up + recon_replace_down - .5, state)
+        if self.is_dou:
+            
+            loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + \
+                    F.mse_loss(recon_continue_up + recon_continue_down - .5, state) + \
+                        F.mse_loss(recon_continue_bias_up + recon_continue_bias_down - .5, state) + \
+                            F.mse_loss(recon_replace_up + recon_replace_down - .5, state)
+            
+    
+            loss =  F.mse_loss(recon_up, state) + F.mse_loss(recon_down, state) +\
+                        F.mse_loss(recon_continue_up, state) + F.mse_loss(recon_continue_down, state) +\
+                            F.mse_loss(recon_continue_bias_up, state) + F.mse_loss(recon_continue_bias_down, state) +\
+                                F.mse_loss(recon_replace_up, state) + F.mse_loss(recon_replace_down, state)
+            
+        else:
+            
+            loss_stright = F.mse_loss(recon_down, state) +\
+                        F.mse_loss(recon_continue_down, state) + F.mse_loss(recon_continue_bias_down, state) + \
+                            F.mse_loss(recon_replace_down, state) 
+            
+    
+            loss =  0
+            
         
-        right_shape = torch.zeros(1).sum().to(x.device)
-        
-        loss_1 = 0
-
-        right_line = torch.zeros(1).sum().to(x.device)
-
-        loss_2 = 0
-        """"""
-        """
-        
-        loss_1, right_shape = self.loss_function_sl(x_shape, y, target = target_shape)
-        
-        loss_2, right_line = self.loss_function_sl(x_line, y, target = target_line)
-
-        """
         
         loss_3, right = self.loss_function_ce(x, idx)
 
         loss_4 = self.my_cov(z)
-
-        """
-
-        if self.training:
-            
-            self.beta.step()
-
-        """
         
         samlpes = torch.randn_like(bias)
         
@@ -756,19 +910,10 @@ class raven_clip(nn.Module):
         loss_5 = F.mse_loss(bias,  samlpes)
 
 
+        
+        
+        return  100*(loss + 100*loss_stright) + 30*loss_3 + 1*loss_4 + loss_5 + 666*vq_loss, loss_stright,  vq_loss, right
        
-        #return 100*(loss + 100*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
-        #2^14_embdv
-
-        return 100*(loss + 100*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + 10*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
-        #2^14_embdv
-        #return 100*(loss + 100*loss_stright) + 20*loss_3 + 1*loss_4 + loss_5 + 5*torch.relu(vq_loss - 0.1) + 10*torch.relu(vq_loss - 0.64) + 100*torch.relu(vq_loss - 0.99), loss_stright,  vq_loss, right
-        #2048_embdv
-        
-        
-        #return 50*(loss + 10*loss_stright) + 10*loss_3 + 1*loss_4 + loss_5 + vq_loss, loss_stright,  vq_loss, right
-        # null_embdv
-
 ################################################################################################################################################################################################
         
     def recon_all(self, state, lambd = 0):
@@ -803,45 +948,31 @@ class raven_clip(nn.Module):
         
         b, n, h, w = state.shape
 
-        # print(state.shape)
  
         x = self.vit(state.view(b*n, 1, h, w))
         
         x, bias = x.chunk(2, dim = -1)
         
         x, _, _ = self.vql(x)
-        
-        # print(x.shape)
+
         x = x.reshape(b, n, self.w, self.low_dim)
         
         bias = bias.reshape(b, n, self.w, self.low_dim)
         
-        # bias = torch.tanh(bias)
-        # print(x.shape)
         x = x + torch.randn_like(x)*lambd
-        x_recon = self.decoder_up(x) + self.decoder_down(x) - 0.5
-        # x_recon = self.decoder(x)
-    
+        
+        x_recon = self.decoder_up(x) + self.decoder_down(x) - 0.5  if self.is_dou else self.decoder_down(x)
+        
         return x_recon.reshape(b, n, h, w)
 
 
 
     def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
-        """
-        Gumbel-Softmax + NLLLoss
         
-        Args:
-            logits: [B, C] 原始 logits
-            target: [B] 类别索引
-            temperature: Gumbel 温度
-        
-        Returns:
-            loss: 标量
-        """
-        # Gumbel 噪声
+        # Gumbel 
         gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
         
-        # Gumbel-Softmax 对数概率
+        # Gumbel-Softmax 
         log_probs = F.log_softmax((logits + gumbel_noise) / temperature, dim=1)
         
         # NLLLoss
@@ -852,15 +983,6 @@ class raven_clip(nn.Module):
 
 
     def dio_loss(self, logits, target, delta= 1, gumbeling = False ):
-        """
-        纯 CE 思路实现 DIO 损失
-        公式: CE + log( (1 - P_a + delta * P_a) / delta )
-        logits : (B, 8)   9-16 号候选 logits
-        target : (B,)     0-7 内的 gt 偏移
-        delta  : 正例系数倒数 = 1/delta
-        """
-        # 1. 交叉熵项（reduction='none' 保留每个样本的 loss）
-        #ce = F.cross_entropy(logits, target, reduction='none')   # -log P_a
         
         if gumbeling:
             ce = self.gumbel_nll_loss(logits, target, reduction='none') 
@@ -869,14 +991,10 @@ class raven_clip(nn.Module):
         else:
             ce = F.cross_entropy(logits, target, reduction='none') 
             p = F.softmax(logits, dim=-1)
-    
-        # 2. 取 P_a
-        #p = F.softmax(logits, dim=-1)            # (B, 8)
         
         if delta<1:
             p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
         
-            # 3. 修正项
             corr = torch.log((1 - p_alpha + delta * p_alpha) / delta)
             
         else:
@@ -884,7 +1002,7 @@ class raven_clip(nn.Module):
     
         return (ce + corr).mean()#, (logits.argmax(dim = -1) == target).float().sum()
     
-    
+        
     def random_replace(self, x, x_code = None, min_replace=1, max_replace=9):
         b, s, d = x.shape
         assert s >= max_replace
@@ -896,32 +1014,44 @@ class raven_clip(nn.Module):
         # 每个batch独立随机替换个数
         count = torch.randint(min_replace, max_replace + 1, (b,), device=device)
         
-        # print(count)
-        
-        # 两次argsort直接得排名，无需scatter
+
         ranks = torch.rand(b, s, device=device).argsort(dim=1).argsort(dim=1)
         
-        # print(ranks)
-        
-        # 排名 < count 即被选中
+  
         mask = (ranks < count.unsqueeze(1)).unsqueeze(-1).expand(-1, -1, d)
-        
-        # print(mask)
-        
-        return torch.where(mask, x_code, x), (1 - count.sum()/(b*s)).item()
 
+        
+        return torch.where(mask, x_code, x), (count.sum()/(b*s)).item()
+    
+    
+    def sample_from_codebook(self, b, k = None):
+        
+        with torch.no_grad():
+            embed = self.vql.embed  # [H, D, N]
+            H, D, N = embed.shape
+            if k is None:
+                k = self.num_aux_candidates  # 采样数K
+            w = self.w  # patch数量(16)
+
+            rand_idx = torch.randint(
+                0, N, 
+                (b, k, w, H), 
+                device=embed.device
+            )
+            
+            embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
+            
+            head_offsets = torch.arange(H, device=embed.device).view(1, 1, 1, H) * N
+            global_idx = rand_idx + head_offsets  # [b, k, w, H]
+            
+            samples = F.embedding(global_idx, embed_flat)
+            
+            samples = samples.reshape(b, k, w, H * D)
+            
+        return samples.detach()  # [b, k, w, low_dim]
     
     def sample_from_codebook_topk(self, b, k=None, top_k=None, strategy='hard', temperature=1.0, perturb_scale = .1):
-        """
-        基于聚类表Top-K的位置感知采样
-        
-        Args:
-            b: batch size
-            k: 采样候选数（默认为self.num_aux_candidates）
-            top_k: 每个位置只考虑聚类表中最常用的top_k个码本
-            strategy: 'hard' 均匀采样topk | 'soft' 按频率加权 | 'mix' 混合
-            temperature: 软采样时的温度（>1更均匀，<1更尖锐）
-        """
+       
         with torch.no_grad():
             embed = self.vql.embed  # [H, D, N]
             H, D, N = embed.shape
@@ -930,29 +1060,26 @@ class raven_clip(nn.Module):
             w = self.w  # 16个位置
             
             if top_k is None:
-                top_k= int(N/self.w) + 256
+                top_k= int(N/self.w)
             
             # 检查聚类表是否可用
             if not self.vql.map_sealed and self.vql.sample_count < 10000:
                 print(f"[Warning] Cluster map not ready ({self.vql.sample_count}), fallback to random")
                 return self.sample_from_codebook(b, k)
             
-            # 获取聚类表 [H, w, N] -> 转为概率分布
-            # cluster_map = self.vql.cluster_map.float()  # [H, w, N]
+           
             cluster_map = self.vql.get_cluster_map(normalize=False)  # [H, w, N]
             
             samples_list = []
                        
-            for pos in range(w):  # 对每个绝对位置分别处理
-                # 获取该位置在所有头上的统计 [H, N]
+            for pos in range(w):  
                 pos_usage = cluster_map[:, pos, :]  # [H, N]
                 
                 if strategy == 'hard':
-                    # === 硬Top-K：只从高频码本中均匀选择 ===
-                    # 获取每个头的高频码本索引
+                   
                     _, topk_indices = torch.topk(pos_usage, top_k, dim=-1)  # [H, top_k]
                     
-                    # 从top_k中随机选择（每个头独立）
+                   
                     rand_in_topk = torch.randint(0, top_k, (b, k, H), device=embed.device)
                     selected_indices = torch.gather(
                         topk_indices.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1), 
@@ -961,22 +1088,20 @@ class raven_clip(nn.Module):
                     ).squeeze(-1)  # [b, k, H]
                     
                 elif strategy == 'soft':
-                    # === 软Top-K：按频率加权的多项式采样 ===
-                    # 先截断到top_k，再归一化
+                   
                     values, indices = torch.topk(pos_usage, top_k, dim=-1)  # [H, top_k]
                     
-                    # 温度调节
+                    
                     probs = F.softmax(values / temperature, dim=-1)  # [H, top_k]
                     
-                    # 多项式采样（每个头独立）
-                    # 使用torch.multinomial，需要对每个头循环或广播
+                  
                     selected_in_topk = torch.multinomial(
                         probs.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1).reshape(-1, top_k),
                         num_samples=1,
                         replacement=True
                     ).reshape(b, k, H)  # [b, k, H] 这是在top_k内的索引
                     
-                    # 映射回真实码本索引
+                   
                     selected_indices = torch.gather(
                         indices.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1),
                         -1,
@@ -984,10 +1109,10 @@ class raven_clip(nn.Module):
                     ).squeeze(-1)  # [b, k, H]
                     
                 elif strategy == 'mix':
-                    # === 混合策略：80%高频 + 20%随机探索 ===
+                    
                     mix_mask = torch.rand(b, k, H, device=embed.device) < 0.8
                     
-                    # 硬topk部分
+                  
                     _, topk_indices = torch.topk(pos_usage, top_k, dim=-1)
                     rand_in_topk = torch.randint(0, top_k, (b, k, H), device=embed.device)
                     hard_samples = torch.gather(
@@ -996,7 +1121,7 @@ class raven_clip(nn.Module):
                         rand_in_topk.unsqueeze(-1)
                     ).squeeze(-1)
                     
-                    # 随机部分
+                 
                     random_samples = torch.randint(0, N, (b, k, H), device=embed.device)
                     
                     selected_indices = torch.where(mix_mask, hard_samples, random_samples)
@@ -1012,11 +1137,12 @@ class raven_clip(nn.Module):
                 pos_samples = F.embedding(global_idx.reshape(-1), embed_flat).reshape(b, k, H, D)
                 samples_list.append(pos_samples)
             
-            # 合并所有位置 [b, k, w, H, D] -> [b, k, w, H*D]
+            # b, k, w, H, D] -> [b, k, w, H*D]
             samples = torch.stack(samples_list, dim=2)  # [b, k, w, H, D]
             samples = samples.reshape(b, k, w, H * D)
             
             return samples.detach()
+       
 
         
 def transpose(x):
@@ -1042,7 +1168,7 @@ def reasoning(*args):
  
 if __name__ == '__main__':
     #from torchsummary import summary
-    from torchinfo import summary
+    
     x = torch.randn(2,16,80,80)
     y = torch.randint(1,(2,7776,16)).long()
     target = torch.randint(7776,(2,)).long()
@@ -1051,34 +1177,21 @@ if __name__ == '__main__':
     model = raven_clip()
     
     model.eval()
-    # params = torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu')
-    # # model_dict =  model.state_dict()
-    
-    # # state_dict = {k:v for k,v in params.items() if k in model_dict.keys()}
-    # for k,q in model.named_parameters():
-    #     if k[:7] != 'tajador':
-    #         print(k)
-    #         q.data = params[k].data
-            
 
-    # 
-    # model_dict.update(state_dict)
-    # model.load_state_dict(model_dict)       
-    # model.load_state_dict(torch.load('./model_Clip_raven_120000_distribute_nine_best.pt', map_location = 'cpu'))
+    torch.save(model.state_dict()  , './model_'+model.name+'_now.pt')
+    
+
     out = model(x)
     
     l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)
     l.backward()
 
     print(model)
-
-    #model = raven_clip().to('cuda' if torch.cuda.is_available() else 'cpu')
-    #summary(model, (16, 80, 80), device='cpu')
+    from torchinfo import summary
+    
     summary(model, input_size=(2, 16, 80, 80),
         col_names=["input_size", "output_size", "num_params", 
                     "kernel_size", "mult_adds", "trainable"], device='cpu')
-    #accuracy = model.choose_accuracy(*out, idx = label)
+    
     
 
-    
-    

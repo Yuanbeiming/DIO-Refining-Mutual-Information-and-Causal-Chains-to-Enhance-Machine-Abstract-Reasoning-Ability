@@ -465,6 +465,8 @@ class raven_clip(nn.Module):
         #self.j_position = nn.Parameter(torch.randn(1, self.w, self.low_dim))
 
         num_decoder_depth = num_depth*2-1
+        
+        if self.num_embeddings == 8192: num_decoder_depth += 2
           
         if self.is_dou:
             self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
@@ -1194,4 +1196,3 @@ if __name__ == '__main__':
                     "kernel_size", "mult_adds", "trainable"], device='cpu')
     
     
-

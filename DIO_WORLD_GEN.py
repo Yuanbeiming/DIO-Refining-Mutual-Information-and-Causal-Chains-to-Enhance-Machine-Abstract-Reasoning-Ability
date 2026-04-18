@@ -368,7 +368,7 @@ class raven_clip(nn.Module):
         vql_heads = 2
 
 
-        self.name = 'DIO_WORLD_sn_continue_Replace_single_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
+        self.name = 'DIO_WORLD_sn_single_deocder_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
             
         if dropout:
             _dropout = 0.1
@@ -441,7 +441,7 @@ class raven_clip(nn.Module):
 
         self.is_dou = False 
 
-        if self.is_dou: self.name = 'DIO_WORLD_sn_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
+        if self.is_dou: self.name = 'DIO_WORLD_sn_double_deocder_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
             
         self.vit = nn.Sequential(ViT(image_size = size, 
                                    patch_size = patch,  

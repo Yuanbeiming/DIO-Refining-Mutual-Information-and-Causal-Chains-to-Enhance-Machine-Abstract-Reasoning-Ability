@@ -18,9 +18,6 @@ from torch.nn.utils import spectral_norm
 
 
 from einops.layers.torch import Rearrange
-
-
-import Infinity_Transformer
 #from SinkhornDistance import SinkhornDistance
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -77,6 +74,8 @@ class Recat(nn.Module):
 
         for i in range(self.num_candidates-1):
             indices += [2, 5, base_idx + i]
+        #print('indices1:', indices)
+        
 
         
         return x[:, indices].reshape(b, -1, 3, s, d)
@@ -102,10 +101,10 @@ class Recombine(nn.Module):
 
         for i in range(2, cr):
             indices += [0,1,i, cr, cr + 1, cr + i]
+        #print('indices2:', indices)
        
         
         return x[:,:, indices].reshape(b, s, cr-2, 6, d)
-    
 
     
     
@@ -201,7 +200,10 @@ class Cross_Transformer_layer(nn.Module):
                 
                 Cross_Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout),
                 PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout)),
-
+                
+                # Cross_Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout),
+                # PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout)),
+                
                 
                 PreNorm(dim, Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout)),
                 PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout))
@@ -240,39 +242,96 @@ class Cross_Transformer(nn.Module):
         return x
 
         
+
+
 class To_image(nn.Module):
-    def __init__(self, c, h ,w):
+    def __init__(self, latent_dim = 1280):
         super().__init__()
         
-        self.linear = nn.Linear(c*h*w, c*h*w)
+        in_feature = 6400
+        
+        self.lin = nn.Sequential(Rearrange('b c h w -> b (c h w)'),
+                                 nn.Linear(in_feature, latent_dim),
+                                 nn.BatchNorm1d(latent_dim),
+                                 nn.GELU(),
+                                 nn.Linear(latent_dim, in_feature),
+                                 Rearrange('b (c h w) -> b c h w', c = 1, h = 80, w = 80)
+            
+            )
+
+
         
     def forward(self, x):
+        out = self.lin(x)
         
-        b, c, h, w = x.shape
+        return out + x
+    
+ 
+class To_image_cnn(nn.Module):
+    def __init__(self, in_ch=1, hidden_ch=4, gn_ch = 4):
+        super().__init__()
         
-        x = x + self.linear(x.reshape(b, -1)).reshape(b, c, h, w)
+        # 下采样: 80x80 -> 40x40
+        self.conv1 = nn.Conv2d(in_ch, hidden_ch, 4, stride=2, padding=1)
+        self.gn1 = nn.GroupNorm(gn_ch, hidden_ch)
+        
+        # 40x40 空间处理
+        self.conv2 = nn.Conv2d(hidden_ch, hidden_ch, 3, padding=1)
+        self.gn2 = nn.GroupNorm(gn_ch, hidden_ch)
+        
+        # 上采样: 40x40 -> 80x80
+        self.conv3 = nn.ConvTranspose2d(hidden_ch, hidden_ch, 4, stride=2, padding=1)
+        self.gn3 = nn.GroupNorm(gn_ch, hidden_ch)
+        
+        # 输出层，融合原始输入
+        self.conv4 = nn.Conv2d(hidden_ch + in_ch, in_ch, 3, padding=1)
+        
+        # 输出层初始化为零（近似恒等）
+        nn.init.zeros_(self.conv1.weight)
+        nn.init.zeros_(self.conv1.bias)
+        nn.init.zeros_(self.conv2.weight)
+        nn.init.zeros_(self.conv2.bias)
+        nn.init.zeros_(self.conv3.weight)
+        nn.init.zeros_(self.conv3.bias)
+        nn.init.zeros_(self.conv4.weight)
+        nn.init.zeros_(self.conv4.bias)
+        
+    def forward(self, x):
+        identity = x
+        
+        # 编码路径
+        h = self.conv1(x)
+        h = self.gn1(h)
+        h = F.gelu(h)
+        
+        h = self.conv2(h)
+        h = self.gn2(h)
+        h = F.gelu(h)
+        
+        # 解码上采样
+        h = self.conv3(h)
+        h = self.gn3(h)
+        h = F.gelu(h)
+        
+        # 融合原始输入，残差输出
+        h = torch.cat([h, identity], dim=1)
+        out = self.conv4(h)
+        
+        return out + identity
 
+def round_tensor(x, decimals=2):
+    factor = 10 ** decimals
+    return torch.floor(x * factor + 0.5) / factor   
 
-        return x
-
-def add_spectral_norm(module):
-         for name, layer in module.named_children():
-                if isinstance(layer, (nn.Linear, nn.Conv2d)) and name[:3]!='vit' and name[:6]!='decode' and name[:5]!= 'embed':
-                    spectral_norm(layer)
-                    print('add sn to: ' + name)
-                else:
-                    add_spectral_norm(layer)
-
-
-
-
-    
-    
 class raven_clip(nn.Module):
-    def __init__(self, *args):
+    def __init__(self, *args, num_aux_candidates = 0):
         super(raven_clip,self).__init__()
 
-     
+        #self.num_embeddings = 8192
+        
+
+        
+
         size = 80
         patch = 20
         
@@ -285,12 +344,10 @@ class raven_clip(nn.Module):
             num_depth = 3
             self.low_dim = 128
 
-        vql_heads = 2
-
-        self.num_aux_candidates = num_aux_candidates = 0
+        
 
 
-        self.name = 'DIO' 
+        self.name = 'DIO_DIEGO_validition'
             
         if dropout:
             _dropout = 0.1
@@ -343,7 +400,9 @@ class raven_clip(nn.Module):
 
         self.w = int(size/patch)*int(size/patch)
         
-        
+        self.num_aux_candidates = num_aux_candidates 
+
+
         
         num_candidates = num_aux_candidates + 8
         
@@ -352,36 +411,31 @@ class raven_clip(nn.Module):
 
         self.temperature = temperature
 
-        self.beta = Beta(alpha = 20, step_size = 0.005)
         
-        self.num_rule = 2
-
-        
-            
+        self.num_rule = 4
+         
+   
         self.vit = nn.Sequential(ViT(image_size = size, 
                                    patch_size = patch,  
-                                   dim = self.low_dim,
+                                   dim = self.low_dim*2,
                                    depth = num_depth, 
                                    heads = num_head, 
-                                   mlp_dim = self.low_dim,
+                                   mlp_dim = self.low_dim*2,
                                    channels = 1, 
-                                   dim_head = int(self.low_dim/num_head), 
+                                   dim_head = int(self.low_dim*2/(num_head)), 
                                    dropout = _dropout, 
                                    emb_dropout = _dropout),
     
                                  )
         
-      
         self.recat = nn.Sequential(Recat(num_aux_candidates = num_aux_candidates),
         Rearrange('b m n s d -> b s m (n d)', s = self.w, n = 3, m = m),
         
-
-        )
-
-        
-
+        )#b*16, 16, dimS
         
         
+        
+
         
         self.g_function = nn.Sequential(
             Rearrange('b s m d -> (b s m) d'),
@@ -393,14 +447,9 @@ class raven_clip(nn.Module):
             Bottleneck_judge(3*self.low_dim, int(self.low_dim*0.75), self.low_dim),#10,10
             
             Rearrange('(b s m) d -> b s m d', s = self.w, m = m),
-            
-            # Recombine(),
-            
-
-            
+ 
         )
         
-
 
         self.graph_clip = nn.Sequential( 
                                         nn.Sequential(get_choise(), shuffle_sample(),),
@@ -436,24 +485,80 @@ class raven_clip(nn.Module):
                             
                             Rearrange('(b m s n) d -> b m (s n d)', s = self.w, m = num_candidates, n = 1),
                             Mean(dim = -1))
-
-        self.num_forward = 0
         
         
+        txt_num_cls = 1
         self.txt_clip = nn.Sequential(Rearrange('b n s -> (b n) s', s = 10, n = txt_size),
-                            txt_mask_transformer(dict_size = 14, words = 10, dim = self.low_dim, depth = num_depth*2, 
-                                                 heads = num_head, dim_head = int(self.low_dim/num_head), mlp_dim = self.low_dim*2, dropout = 0.1,is_pgm = True, num_cls=1),
-                            take_cls(),
+                            txt_mask_transformer(dict_size = 14, words = 10, dim = self.low_dim, depth = 3, 
+                                                 heads = num_head, dim_head = int(self.low_dim/num_head), mlp_dim = self.low_dim*2, dropout = 0.1,is_pgm = True, 
+                                                 num_cls=min(1, txt_num_cls)),
+                            Mean(dim = 1) if txt_num_cls == 0 else take_cls(txt_num_cls),
+                            # take_cls(),
                             Rearrange('(b n) d -> b n d', n = txt_size)) #b,336,d
 
-
-       
         
-                
-        #add_spectral_norm(self)
+        
+        #self._add_spectral_norm()
+        self.replace_x = 0
+        self.max_replace = int(self.w/2)
+        self.noise_x = 1
 
-                
-         
+################################################################################################################################################################################################
+        self.pretrain = True
+
+        if self.pretrain:
+            
+            
+
+            pretrained_params = torch.load('C:/Users/DELL/Desktop/DIO_code/generate model/model_DIO_DIEGO_validation.pt', map_location = 'cpu')
+
+
+           
+            for name, param in self.named_parameters():
+                if name in pretrained_params:#
+                    
+                    if name[:3] == 'vit':
+                             param.requires_grad = False   
+                else:
+                    print(f"Warning: Parameter '{name}' not found in pretrained dict.")
+                        
+                    
+             
+            for name, buffer in self.named_buffers():
+                if name in pretrained_params:
+                    if name[:3] != 'vql':
+                         buffer.data.copy_(pretrained_params[name].data)
+
+                else:
+                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
+
+        print('num_aux_candidates:', num_aux_candidates)
+        print('noise_x is:', self.noise_x)
+
+
+    
+        
+
+    
+    def _add_spectral_norm(self):
+        
+        
+        exclude_names = {'vit', 'txt_clip'}
+        
+        for name, module in self.named_modules():
+            # 跳过模型本身（name为空）和排除模块及其子模块
+            if not name:
+                continue
+            
+            # 检查路径中是否包含排除的模块名（如 vit.transformer 会被排除）
+            if any(excluded in name.split('.') for excluded in exclude_names):
+                continue
+            
+            # 只为 Linear 和 Conv2d 添加谱归一化
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                spectral_norm(module)
+                print(f'add sn to: {name}')
+
 
        
     
@@ -484,51 +589,80 @@ class raven_clip(nn.Module):
         
         b, n, h, w = x.shape
         
-
         x = x.view(b*n, 1, h, w)
- 
+        
         x = self.vit(x)
+        
+        x, _ = x.chunk(2, dim = -1)
         
         x = x.reshape(b,n,-1,self.low_dim)
         
-        K = self.num_aux_candidates
+        extra_candidates = torch.empty(b, 0, 16, self.low_dim, device=x.device)
         
-        if K > 0:
-            extra_candidates = torch.randn(b, K, 16, self.low_dim, device=x.device)  # [b, K, 16, dim]
-            
-            # extra_bias = torch.randn_like(extra_candidates)
-        else:
-            extra_candidates = torch.empty(b, 0, 16, self.low_dim, device=x.device)
-        
-
-
         x = torch.cat([x, extra_candidates], dim = 1)
-        
-        
-        
-        
+
         x = self.recat(x)
         
-        x = self.g_function(x + torch.randn_like(x) if self.training else x)
+        x = self.g_function(x + torch.randn_like(x)*self.noise_x if self.training else x)
 
         qkv = self.graph_clip(self.recombine(x))
         
-        qkv = qkv.chunk(self.num_rule, dim = -2)
+        qkv = qkv.chunk(self.num_rule, dim = -2)#b s n c d
         
-        y = self.txt_clip(self.txt_data.to(x.device))
+
         
         out =  map(lambda t: self.tajador(self.forward_cross_attention(t.squeeze(-2))), qkv)
         
+        
 
+        y = self.txt_clip(self.txt_data.to(x.device))
+        
 
+                
         return *list(map(lambda t: t.mean(dim = 1).squeeze(), qkv)), x.reshape(-1, self.low_dim), \
-            sum(list(out)), y
+            self.agg_out(out), y
         
     #"""
+    def agg_out(self, out, select=[1,2,3,4], agg='mean'):
+        """
+        对 map/iterable 结果按索引选择后聚合。
+        select: None -> 默认全部 rule (range(num_rule))
+                int  -> 单取该索引
+                list/tuple -> 多索引
+                slice    -> 切片
+        agg: 'mean' | 'sum'
+        """
+        out_list = list(out)
+        sel = [i for i in range(self.num_rule)] if select is None else select
+    
+        if isinstance(sel, int):
+            return out_list[sel]
+    
+        # 统一转成列表
+        if isinstance(sel, slice):
+            selected = out_list[sel]
+        elif isinstance(sel, (list, tuple)):
+            selected = [out_list[i] for i in sel]
+        else:
+            raise TypeError(f"select must be int/list/tuple/slice, got {type(sel)}")
+    
+        if len(selected) == 0:
+            raise ValueError("selected rule outputs is empty")
+    
+        if agg == 'sum':
+            return sum(selected)
+        elif agg == 'mean':
+            return sum(selected) / len(selected)
+        else:
+            raise ValueError(f"agg must be 'mean' or 'sum', got {agg}")
+
+
 
     def my_cov(self, z):
         n = z.shape[0]
         d = z.shape[1]
+        if n <= d :
+            return 0
         # z = z.reshape(-1, self.laten_code)
         z_ = z.mean(dim = 0,keepdim = True)
         C_z = (torch.matmul((z - z_)[:,:,None], (z - z_)[:,None,:]).sum(dim = 0))/(n - 1)
@@ -537,10 +671,18 @@ class raven_clip(nn.Module):
     
         
     def loss_function_ce(self, x, idx):
+        
+        return self.dio_loss(x, idx), (x.argmax(dim = -1) == idx).float().sum() if self.training else (x[:, :8].argmax(dim = -1) == idx).float().sum()
+        """
+        loss = self.dio_loss(x, idx, reduction='none' )
+        
+        
+        is_wrong = (x.argmax(dim = -1) != idx).float()*1 + 1
 
-        return self.dio_loss(x, idx), (x.argmax(dim = -1) == idx).float().sum()
 
-    
+        return (loss*is_wrong).mean(),\
+            (x.argmax(dim = -1) == idx).float().sum() if self.training else (x[:, :8].argmax(dim = -1) == idx).float().sum()
+        """
     
     def loss_function_sl(self, *out, target):
         
@@ -549,8 +691,9 @@ class raven_clip(nn.Module):
         
         keep_rule = (target != 7775)
         
-        graph = out[0]# b 5 d
-        # print(graph.shape)
+        graph = out[0].mean(dim = 1, keepdim = True)# b 9 d
+        
+        
 
         txt = out[1]# b t 7775 d
         # print(txt.shape)
@@ -565,64 +708,128 @@ class raven_clip(nn.Module):
 
             r = F.cosine_similarity(graph[keep_rule,:,None, None], txt[:,None,:], dim = -1).mean(dim = -2) #b 5, t, 7775
             
-            # print(r.shape)
             
-            loss_1 += F.cross_entropy(r.reshape(-1, 7775)/ self.temperature, target[keep_rule, None].expand(-1, r.shape[1]).reshape(-1))
+            loss_1 += F.cross_entropy(r.reshape(-1, 7775)/ 1e-6, target[keep_rule, None].expand(-1, r.shape[1]).reshape(-1))
 
-            right = (r.argmax(dim = -1).reshape(-1) == target[keep_rule, None].expand(-1, 9).reshape(-1)).float().sum()/9
+            right = (r.argmax(dim = -1).reshape(-1) == target[keep_rule, None].expand(-1, r.shape[1]).reshape(-1)).float().sum()/r.shape[1]
 
             """"""
 
         
-        return loss_1, right
-    
+        return loss_1, right, right/keep_rule.sum()
     
     
     def loss_function(self, *out, target_shape, target_line, idx):
+
+
+        # _, _, x_shape, x_line, z, x, y, bias, state, recon_up, recon_down, recon_bias_up, recon_bias_down = out
         
-        # idx = None
-        x_shape, x_line, z, x, y= out
-        
-        
+        x_shape, x_line, _, _,  z, x, y = out
+                       
         idx_ = F.one_hot(idx, 8)[:,:,None,None]
         
-        x_shape = (x_shape*idx_).sum(dim = 1)
+        x_shape = (x_shape[:,:8]*idx_).sum(dim = 1)
         
-        x_line = (x_line*idx_).sum(dim = 1)
+        x_line = (x_line[:,:8]*idx_).sum(dim = 1)
         
-        loss_1, right_shape = self.loss_function_sl(x_shape, y, target = target_shape)
+ 
+        y = y.unsqueeze(1)
         
-        loss_2, right_line = self.loss_function_sl(x_line, y, target = target_line)
-
-
+        # self.replace_x = 1 - (self.max_replace/self.w)
+       
+        # loss = F.mse_loss(recon_up, state) + F.mse_loss(recon_bias_up, state) +\
+        #     F.mse_loss(recon_down, state) + F.mse_loss(recon_bias_down, state)
+        
+        
+        loss_1, right_shape, rr_shape = self.loss_function_sl(x_shape, y, target = target_shape)
+        
+        loss_2, right_line, rr_line = self.loss_function_sl(x_line, y, target = target_line)
+        
+        
         
         loss_3, right = self.loss_function_ce(x, idx)
 
         loss_4 = self.my_cov(z)
+        
 
        
-      
+        return 10*(loss_1 + loss_2) + 50*loss_3 + 0.1*loss_4, rr_shape,  rr_line, right
+        # null_embdv
 
-
-        return  loss_1 + loss_2 + loss_3 + 0*loss_4,  right_shape, right_line, right
-
-
+################################################################################################################################################################################################
         
+    
 
 
-
-    def dio_loss(self, logits, target, delta=1e-5):
+    def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
+        """
+        Gumbel-Softmax + NLLLoss
         
-        ce = F.cross_entropy(logits, target, reduction='none')   # -log P_a
-    
+        Args:
+            logits: [B, C] 原始 logits
+            target: [B] 类别索引
+            temperature: Gumbel 温度
+        
+        Returns:
+            loss: 标量
+        """
+        # Gumbel 噪声
+        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
+        
+        # Gumbel-Softmax 对数概率
+        log_probs = F.log_softmax((logits + gumbel_noise) / temperature, dim=1)
+        
+        # NLLLoss
+        return F.nll_loss(log_probs, target, reduction= reduction)
 
-        p = F.softmax(logits, dim=-1)            # (B, 8)
-        p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
-    
 
-        corr = torch.log((1 - p_alpha + delta * p_alpha) / delta)
+
+
+
+    def dio_loss(self, logits, target, delta= 1, gumbeling = False, reduction='mean' ):
+        """
+        纯 CE 思路实现 DIO 损失
+        公式: CE + log( (1 - P_a + delta * P_a) / delta )
+        logits : (B, 8)   9-16 号候选 logits
+        target : (B,)     0-7 内的 gt 偏移
+        delta  : 正例系数倒数 = 1/delta
+        """
+        # 1. 交叉熵项（reduction='none' 保留每个样本的 loss）
+        #ce = F.cross_entropy(logits, target, reduction='none')   # -log P_a
+        
+        if gumbeling:
+            ce = self.gumbel_nll_loss(logits, target, reduction='none') 
+            p = F.gumbel_softmax(logits, dim=-1)
+            
+        else:
+            ce = F.cross_entropy(logits, target, reduction='none') 
+            p = F.softmax(logits, dim=-1)
     
-        return (ce + corr).mean(), (logits.argmax(dim = -1) == target).float().sum()
+        # 2. 取 P_a
+        #p = F.softmax(logits, dim=-1)            # (B, 8)
+        
+        if delta<1:
+            p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
+        
+            # 3. 修正项
+            corr = torch.log((1 - p_alpha + delta * p_alpha) / delta)
+            
+        else:
+            corr = 0
+            
+        if reduction == 'mean':
+            return (ce + corr).mean()#, (logits.argmax(dim = -1) == target).float().sum()
+        
+        elif reduction == 'sum':
+            return (ce + corr).sum()
+        
+        else:
+            return ce + corr
+        
+        
+        
+    
+       
 
         
 def transpose(x):
@@ -647,49 +854,31 @@ def reasoning(*args):
 
  
 if __name__ == '__main__':
+    #from torchsummary import summary
     
-    num_item = 1
-    x = torch.randn(num_item,16,80,80)
-    y = torch.randint(1,(num_item,7776,16)).long()
-    target = torch.randint(7776,(num_item,)).long()
-    label = torch.randint(8,(num_item,)).long()
+    x = torch.randn(2,16,80,80)
+    y = torch.randint(1,(2,7776,16)).long()
+    target = torch.randint(7776,(2,)).long()
+    label = torch.randint(8,(2,)).long()
     
     model = raven_clip()
     
     model.eval()
-    out = model(x)
+    torch.save(model.state_dict() , './model_DIO_DIEGO_validition_.pt')
     
+#%%   
+    out = model(x)
+    #%%
     l, right_shape, right_line, right = model.loss_function(*out, target_shape = target, target_line = target, idx = label)
     l.backward()
 
     print(model)
-
     from torchinfo import summary
-    summary(model, input_size=(1, 16, 80, 80),
+    #model = raven_clip().to('cuda' if torch.cuda.is_available() else 'cpu')
+    #summary(model, (16, 80, 80), device='cpu')
+    summary(model, input_size=(2, 16, 80, 80),
         col_names=["input_size", "output_size", "num_params", 
                     "kernel_size", "mult_adds", "trainable"], device='cpu')
     #accuracy = model.choose_accuracy(*out, idx = label)
     
-    from torch.utils.benchmark import Timer
 
-    stmt = "model(input_tensor)"
-    setup = "model.eval(); torch.cuda.synchronize()"
-    model = raven_clip(num_aux_candidates = 0)
-    device = torch.device("cuda")
-    #device = torch.device("cpu")
-
-    timer = Timer(
-        stmt=stmt,
-        setup=setup,
-        globals={"model": model.to(device), "input_tensor": x.to(device)},
-        num_threads=4,
-        label="Latency",
-        sub_label="batch=1"
-    )
-
-    result = timer.blocked_autorange(min_run_time=10)  # 至少跑10秒
-    print(f"{result.median*1000:.3f} ms ± {result.iqr*1000:.3f} ms")
-
-
-    
-    

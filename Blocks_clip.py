@@ -2241,7 +2241,7 @@ class GracefulSaver:
     def restore_handler(self):
         """恢复原始信号处理（如需要）"""
         signal.signal(signal.SIGINT, self.original_handler)
-https://github.com/Yuanbeiming/DIO-Refining-Mutual-Information-and-Causal-Chains-to-Enhance-Machine-Abstract-Reasoning-Ability/blob/main/Blocks_clip.py
+
 
         
 def print_lr_dict(optimizer, model=None):

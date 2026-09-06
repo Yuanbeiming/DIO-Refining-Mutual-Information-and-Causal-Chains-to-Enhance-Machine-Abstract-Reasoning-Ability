@@ -350,9 +350,13 @@ class Brando(nn.Module):
         prompt = Rearrange('(b s) d -> b s d', s = self.w)(prompt[:,8])
         
         
-        self.M.data.copy_(torch.stack(M, dim = 0).mean(dim = 1))
+        if self.training:
+			
+            with torch.no_grad():
         
-        self.B.data.copy_(torch.stack(B, dim = 0).mean(dim = 1))
+                self.M.data.copy_(torch.stack(M, dim = 0).mean(dim = 1))
+                
+                self.B.data.copy_(torch.stack(B, dim = 0).mean(dim = 1))
         
         
         

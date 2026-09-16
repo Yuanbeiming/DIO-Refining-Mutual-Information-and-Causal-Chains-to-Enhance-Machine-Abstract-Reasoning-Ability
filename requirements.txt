@@ -1,0 +1,12 @@
+# Core dependencies for DIO (tested on Python 3.11.7, 8 x NVIDIA A100 80G)
+# Install PyTorch with the CUDA build matching your driver (this project used CUDA 12.9):
+#   pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu129
+# or simply:
+#   pip install -r requirements.txt
+
+torch==2.8.0
+torchvision==0.23.0
+numpy==1.26.4
+einops==0.8.1
+tqdm==4.65.0
+torchinfo==1.8.0

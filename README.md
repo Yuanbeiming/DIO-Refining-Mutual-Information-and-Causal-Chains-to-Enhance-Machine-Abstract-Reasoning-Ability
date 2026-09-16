@@ -21,6 +21,7 @@ Official implementation of **DIO** (Deep-learning Intelligent-model Organized vi
 | `Blocks_clip.py` | Shared building blocks: ViT, attention, feed-forward layers, etc. |
 | `Infinity_Transformer.py` | Infinite-attention style memory bank used by the Brando network |
 | `make_pgm_data.py` | Dataset / DataLoader for PGM-style `.npz` files |
+| `Text_DIO.py` | Test script: loads a trained checkpoint and evaluates accuracies on the val/test split |
 
 Each model file contains a `__main__` self-test that runs a forward/backward pass on random inputs, prints a `torchinfo` summary, and benchmarks single-instance latency with `torch.utils.benchmark.Timer`.
 
@@ -128,8 +129,8 @@ scheduler.step()
 |---|---|---|
 | Solo DIO | `DIO.py : raven_clip()` | IFEM 128/3/4, PPIM & PCEM 64/3/4 (dim/depth/heads) |
 | DIO + Brando | `DIO_Brando.py : raven_clip(num_aux_candidates=8)` | 8 hypothetical options (β = 24); Brando latent dim 64, depth L = 9, H = 4 heads, head dim 16; memory matrix init. 0, buffer init. 1e-9 |
-| DIO + WORLD | `DIO_WORLD.py` | M = 2^11 GMM components; decoder 64/7/4; 256 samples (16 per token) |
-| DIO + WORLD_G | `DIO_WORLD_GEN.py` | M = 2^14 components, G = 2 heads (hierarchical interaction); spectral/Lipschitz normalization |
+| DIO + WORLD | `DIO_WORLD.py(num_aux_candidates=16)` | M = 2^11 GMM components; decoder 64/7/4; 256 samples (16 per token) |
+| DIO + WORLD_G | `DIO_WORLD_GEN.py(num_aux_candidates=16)` | M = 2^14 components, G = 2 heads (hierarchical interaction); spectral/Lipschitz normalization |
 | DIO + DIEGO | `DIO_DIEGO.py` | scaling coefficient τ init. 1e-6; reference vector dim 64 |
 
 Notes:
@@ -137,6 +138,52 @@ Notes:
 - **DIO + Brando** requires a pre-trained DIO checkpoint: DIO is first trained with ℓ_DIO until near-optimal, then Brando is integrated and the loss switches to ℓ_Brando; during joint training DIO's parameters (except the image feature extraction module) are frozen every other iteration.
 - **WORLD components** are initialized from N(0, 1) and ℓ2-normalized; the EMA decay η is 0.99 during active training and switches to 0.9999 after the backbone is frozen (EMA ε = 1e-5); loss coefficients in EMA mode: ℓ1 : ℓ2 : ℓ4 : ℓ5 = 6 : 1 : 20 : 20. Auxiliary negatives are sampled from the top-50% most-used components, optionally with an inter-instance strategy (an engineering approximation, not a theoretical equivalence).
 - **DIEGO** uses metadata only during training; the reference dictionary is discarded at test time.
+
+---
+
+## 6. Using the Models in Test
+
+`Text_DIO.py` is the released test script. It loads a trained checkpoint and reports three accuracies on the chosen split: **shape** (metadata-based shape-rule accuracy), **line** (metadata-based line-rule accuracy), and **choose** (option-selection accuracy — the main metric reported in the paper). Samples without metadata (label id `7775`) are excluded from the shape/line denominators; the choose accuracy is always computed over all samples.
+
+### Step 1 — Select the model configuration
+
+Point the import at the model file of the configuration to be evaluated:
+
+```python
+import DIO as model_vit   # e.g. DIO, DIO_Brando, DIO_WORLD, DIO_WORLD_GEN, DIO_DIEGO
+import make_pgm_data as make_data
+```
+
+### Step 2 — Select the dataset split
+
+In `make_pgm_data.py`, set `path` to the folder of the target sub-task (e.g. `./neutral/`); the folder name is used to locate checkpoints and name result files. In `Text_DIO.py`, choose the split:
+
+```python
+val_set = make_data.Raven_Data(train=False, val=True)    # validation split
+# val_set = make_data.Raven_Data(train=False, val=False) # test split
+```
+
+### Step 3 — Locate the checkpoint
+
+The script reconstructs the checkpoint name with the same rule as the training scripts:
+
+```
+./model_{model.name}_{len_train_set}_{dataset}_best.pt
+```
+
+Set `len_train_set` to the size of the training set used for that run, or simply hard-code the checkpoint path:
+
+```python
+checkpoint = './model_DIO_WORLD_GEN_1200000_neutral_best.pt'   # example
+```
+
+### Step 4 — Run
+
+```bash
+python Text_DIO.py
+```
+
+The script fixes the seed (`init_seeds(2048)`), resizes images to 80×80, normalizes by 255, and runs inference under `model.eval()` with `torch.no_grad()`. Results are printed to the console and appended to `test_on_{model.name}{dataset}.txt`
 
 
 

@@ -19,6 +19,9 @@ from torch.nn.utils import spectral_norm
 
 from einops.layers.torch import Rearrange
 #from SinkhornDistance import SinkhornDistance
+from torchvision import transforms
+
+t = transforms.Resize((80,80))
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 big = False
@@ -345,11 +348,10 @@ class To_image_cnn(nn.Module):
    
 
 class raven_clip(nn.Module):
-    def __init__(self, *args, num_aux_candidates =  0):
+    def __init__(self, *args, num_aux_candidates = 8):
         super(raven_clip,self).__init__()
 
-        #self.num_embeddings = 8192
-        self.num_embeddings = 2**14
+        
 
         
 
@@ -365,10 +367,8 @@ class raven_clip(nn.Module):
             num_depth = 3
             self.low_dim = 128
 
-        vql_heads = 2
-
-
-        self.name = 'DIO_WORLD_sn_single_deocder_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
+        
+    
             
         if dropout:
             _dropout = 0.1
@@ -420,6 +420,9 @@ class raven_clip(nn.Module):
     
 
         self.w = int(size/patch)*int(size/patch)
+
+        #self.num_embeddings = 8192
+        self.num_embeddings = (2**14)#*self.w
         
         self.num_aux_candidates = num_aux_candidates #int((16**vql_heads)/self.w)
 
@@ -437,11 +440,20 @@ class raven_clip(nn.Module):
 
         is_mix = True
 
-        is_cnn = True
+        is_cnn = False
 
         self.is_dou = False 
+        self.if_sn = True
 
-        if self.is_dou: self.name = 'DIO_WORLD_sn_double_deocder_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads)
+        self.vql_heads = vql_heads = 2
+
+        self.name = 'DIO_WORLD_'+ ('sn_' if self.if_sn else '_') + 'toxic_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads) + '_candidates_' +str(num_aux_candidates)
+
+        if self.is_dou: self.name = self.name + '_double_decoder'
+
+        if is_cnn: self.name = self.name + '_add_CNN'
+
+        if is_mix == False: self.name = self.name + '_without_mix'
             
         self.vit = nn.Sequential(ViT(image_size = size, 
                                    patch_size = patch,  
@@ -462,11 +474,10 @@ class raven_clip(nn.Module):
 
         )#b*16, 16, dimS
         
-        #self.j_position = nn.Parameter(torch.randn(1, self.w, self.low_dim))
-
-        num_decoder_depth = num_depth*2-1
         
-        if self.num_embeddings == 8192: num_decoder_depth += 2
+
+
+        num_decoder_depth = num_depth*2+1
           
         if self.is_dou:
             self.decoder_up = nn.Sequential(Rearrange('b n s d -> (b n) s d',  s = self.w),
@@ -533,8 +544,7 @@ class raven_clip(nn.Module):
             Bottleneck_judge(3*self.low_dim, int(self.low_dim*0.75), self.low_dim),#10,10
             
             Rearrange('(b s m) d -> b s m d', s = self.w, m = m),
-            
-            # Recombine(),
+
             
 
             
@@ -573,86 +583,135 @@ class raven_clip(nn.Module):
         
         self.tajador = nn.Sequential(Rearrange('b m s n d -> (b m s n) d'),
                             Bottleneck_judge(self.low_dim, self.low_dim),
-                            
-                            Rearrange('(b m s n) d -> b m (s n d)', s = self.w, m = num_candidates, n = 1),
-                            Mean(dim = -1))
+                            )
         
-        
-    
 
-        self.vql_gumbel = True
+        self.is_gumbel_vql = False
+        gumbel_tau = 5.0
+        init_length = 12
         self.vql = VectorQuantizerEMA_multi_head_revival_with_recored(n_embed = self.num_embeddings,
-			                                        dim = self.low_dim,
-			                                        num_head = vql_heads,
-			                                        beta = self.beta,
-			                                        #decay = 0.99995,
-			                                        decay = 1,
-			                                        vq_loss_type = 'mse',
-			                                        num_positions = self.w,
-			                                        MAX_sample = 1920e4,
-                                                    is_gumbel= self.vql_gumbel)
-        self._add_spectral_norm()
+                                              dim = self.low_dim,
+                                              num_head = vql_heads,
+                                              init_length = init_length,
+                                              beta = self.beta,
+                                              decay = 1,
+                                              #decay = 1 - (1e-8),
+                                              #decay = 0.99,
+                                              #decay = 0.9,
+                                              #decay = 0.99999,
+                                              vq_loss_type = 'mse',
+                                              num_positions = self.w,
+                                              MAX_sample = 1920e4,
+                                              is_gumbel = self.is_gumbel_vql,
+                                              gumbel_tau = gumbel_tau,
+                                              if_revival = True,
+                                              normal_init = False,
+                                              is_gumbel_update = False
+                                              )
+        if self.if_sn: self._add_spectral_norm()
         self.replace_x = 0
         self.max_replace = int(self.w/2)
-        self.noise_x = 1.0
-################################################################################################################################################################################################
-        self.pretrain = True
+        self.reasoning_noise = 1.0
+        self.option_noise = 0.05
+        self.noise_x = init_length/(self.low_dim/vql_heads)**0.5 #if is_cnn else 2.5
+        self.noise_y = 6.0
+        self.s_x = 0 if self.vql.decay == 1 else 0
+        self.pattern_extent = 1000000
+        
+        self.vq_extent = 1.3e6
+        self.vq_extent_2 = 1e4 
+        self.vq_lower_bound = 1.69
+        self.vq_lower_bound_2 = 1.
+        
+        self.reasoning_extent = 400000  
+        self.dio_delta = 1e-7
+        
+        self.gen_extent = 3e6 
+        
+        self.norm_extent = 1e7  
+        self.bias_extent = 1e2
+        self.norm_lower_bound = init_length
+        
+        self.noise_pattern = self.noise_x != self.reasoning_noise
+        self.noise_w = torch.distributions.Uniform(min(self.reasoning_noise, 1), self.noise_x) if self.noise_x != self.reasoning_noise else None
+        self.noise_v = torch.distributions.Uniform(min(self.reasoning_noise, 1), self.noise_y) if self.noise_y != self.reasoning_noise else None
+        self.toxic = True
+        self.j_mean = False
+        self.only_option_noise = False
+        self.print_norm = False #self.vql.decay == 1
+        self.strike_norm = True
 
-        if self.pretrain:
-            
-           
+        if self.j_mean == False: self.j_position = nn.Parameter(torch.zeros(self.w, self.low_dim))
+        
+        
 
-            pretrained_params = torch.load('./model_DIO_WORLD_sn_embdv16384_heads_2_GENN_CNN_best.pt', map_location = 'cpu')
-            #98.55% Spectral normalization almost inevitably degrades model performance.
-            for name, param in self.named_parameters():
-                if name in pretrained_params:
-                        param.data = pretrained_params[name].data
-                     
 
-                else:
-                        print(f"Warning: Parameter '{name}' not found in pretrained dict.")
-                    
-               
-   
-            for name, buffer in self.named_buffers():
-                if name in pretrained_params:
-                    
-                         buffer.data.copy_(pretrained_params[name].data)
+        
+        
 
-                else:
-                    print(f"Warning: Buffer '{name}' not found in pretrained dict.")
-                    
-                    
-              
-                
         if self.vql.decay < 1:
             print('val_decay:', self.vql.decay)
         else:
             print('*'*100)
             print('Worning! embed is fixed')
         print('num_aux_candidates:', num_aux_candidates)
-        print('noise_x is', str(self.noise_x))
-        if self.vql_gumbel: print('Gumbel sampling is employed for centroid selection in GMM.')
+        print('=' * 60)
+        print(f"reasoning_noise is {self.reasoning_noise}")
+        print(f"noise_x is {self.noise_x}")
+        print(f"noise_y is {self.noise_y}")
+        print(f"s_x is {self.s_x}")
+        print(f"vq_extent is {self.vq_extent}")
+        print(f"vq_lower_bound is {self.vq_lower_bound}")
+        print(f"vq_extent_2 is {self.vq_extent_2}")
+        print(f"vq_lower_bound_2 is {self.vq_lower_bound_2}")
+        print(f"reasoning_extent is {self.reasoning_extent}")
+        print(f"gen_extent is {self.gen_extent}")
+        print(f"dio_delta is {self.dio_delta}")
+        print(f"norm_extent is {self.norm_extent}")
+        print(f"norm_lower_bound is {self.norm_lower_bound}")
+        print(f"noise_pattern is {self.noise_pattern}")
+        print(f"noise_w is {self.noise_w}")
+        print(f"noise_v is {self.noise_v}")
+        print(f"toxic is {self.toxic}")
+        print(f"j_mean is {self.j_mean}")
+        print(f"init_length is {init_length}")
+        print(f"only_option_noise is {self.only_option_noise}")
+        if self.only_option_noise: print(f"option_noise is {self.option_noise}")
+        print(f"strike_norm is {self.strike_norm}")
+        print('=' * 60)
         
 
     def _add_spectral_norm(self):
         
         
-        exclude_names = {'vit', 'decoder_up', 'decoder_down'}
+        exclude_names = {'vit', 'decoder_up', 'decoder_down', 'txt_clip'}
         
         for name, module in self.named_modules():
-           
+            # 跳过模型本身（name为空）和排除模块及其子模块
             if not name:
                 continue
             
-            
+            # 检查路径中是否包含排除的模块名（如 vit.transformer 会被排除）
             if any(excluded in name.split('.') for excluded in exclude_names):
                 continue
             
-            
+            # 只为 Linear 和 Conv2d 添加谱归一化
             if isinstance(module, (nn.Linear, nn.Conv2d)):
                 spectral_norm(module)
                 print(f'add sn to: {name}')
+                
+    def eval_except_vql(self):
+	    """
+	    将除 vql 及其子模块外的所有模块置为 eval()，
+	    vql 保持 train() 模式（用于 EMA 更新等）。
+	    """
+	    for name, module in self.named_modules():
+	        if name == 'vql' or name.startswith('vql.'):
+	            module.train()
+	        else:
+	            module.eval()
+	    return self
+	    
 
        
     
@@ -690,111 +749,192 @@ class raven_clip(nn.Module):
         
         x, bias = x.chunk(2, dim = -1)
 
+        norm = x.reshape(b*n, self.w, self.vql_heads, -1).norm(dim = -1)
+        
+
+        if self.strike_norm : x = (x.reshape(b*n, self.w, self.vql_heads, -1)/norm.detach()[:,:,:,None] * self.norm_lower_bound).reshape(b*n, self.w, -1)
+
+
         x_recon, vq_loss, _ = self.vql(x)
-        
-        #x_recon, vq_loss = x, torch.zeros(1, device = x.device).sum()
-        
+ 
         x_recon = x_recon.view(b, n, self.w, self.low_dim)
         
-        x = x.reshape(b,n,-1,self.low_dim)
+        x = x.reshape(b,n,self.w,self.low_dim)
         
         bias = bias.reshape(b,n,-1,self.low_dim)
 
+        x_replace = self.random_replace(x = x_recon.detach().reshape(-1, self.w, self.low_dim),
+                                        x_code =  x.reshape(-1, self.w, self.low_dim),
+                                        min_replace=1, max_replace=self.w
+                                       )[0].reshape(b, n, self.w, self.low_dim)
+
         noise_x = self.noise_x
+
+        noise_w = self.noise_w.sample((b, n, self.w ,1)).to(x.device) if self.noise_pattern else None
+
+
         
         
-        if self.is_dou: recon_continue_up = self.decoder_up(x + torch.randn_like(x_recon)*noise_x if self.training else x)
+        if self.is_dou: recon_continue_up = self.decoder_up(x + torch.randn_like(x)*(noise_w if self.noise_pattern else noise_x) if self.training else x)
         
         
-        recon_continue_down =             self.decoder_down(x + torch.randn_like(x_recon)*noise_x if self.training else x)
+        recon_continue_down =             self.decoder_down(x + torch.randn_like(x)*(noise_w if self.noise_pattern else noise_x) if self.training else x)
         
         
-        if self.is_dou: recon_continue_bias_up = self.decoder_up(x + bias + torch.randn_like(x_recon)*max(noise_x - 1, 0) if self.training else x)
+        if self.is_dou: recon_continue_bias_up = self.decoder_up(x + bias if self.training else x)
         
         
-        recon_continue_bias_down =             self.decoder_down(x + bias + torch.randn_like(x_recon)*max(noise_x - 1, 0) if self.training else x)
+        recon_continue_bias_down =             self.decoder_down(x + bias if self.training else x)
         
 
         if self.training:
-            point = int(b/2)
-    
-            x = torch.cat([x[:point], 
-                           torch.cat([x[point:,:8], x_recon[point:,8:]], dim = 1)
-                           ], dim = 0)
-        
-        
+
+            point = 0
+
+            if self.vql.decay != 1:
+                
+
+                x = torch.cat([x[:,:8], 
+                               x_recon[:,8:] + torch.randn_like(x_recon[:,8:])*self.option_noise ], dim = 1)
+                
+
+            elif self.only_option_noise and self.vql.decay == 1:
+                
+                x = torch.cat([x[:, :8], x[:, 8:] + torch.randn_like(x[:, 8:])*self.reasoning_noise], dim = 1)
+
+   
+            else:
+                x = x + torch.randn_like(x)*self.reasoning_noise
+               
+
         K = self.num_aux_candidates
         
-        if K > 0:
+        if K > 0 and self.is_gumbel_vql == False:
             
-            point_x = int(K/2)
-            extra_candidates = torch.empty(b, 0, self.w, self.low_dim, device = x.device) if point_x == 0 else self.sample_from_codebook_topk(b, point_x)  # [b, K, 16, dim]
+            point_x = 0 if self.vql.decay == 1 else int(K/2)
+            extra_candidates = torch.empty(b, 0, self.w, self.low_dim, device = x.device) if point_x == 0 else self.sample_from_codebook_topk(b, point_x, strategy = 'hard')  
+
             extra_candidates = torch.cat([extra_candidates, 
-                                          x_recon[:, :8, :].reshape(-1, self.w, self.low_dim)[torch.randint(0, b*8, (b*(K - point_x), ))].reshape(b, K - point_x, self.w, self.low_dim)],
+                                          (x if self.vql.decay == 1 else x_recon)[:, :8, :].reshape(-1, self.w, self.low_dim)[torch.randint(0, b*8, (b*(K - point_x), ))].reshape(b, K - point_x, self.w, self.low_dim)],
+                                          
                                          dim = 1)
-            
+                                         
+        elif K > 0 and self.is_gumbel_vql == True:
+            point_x = max(K - 8, 0)
+            extra_candidates = self.sample_from_codebook(b, point_x)  # [b, K, 16, dim]_topk
+            extra_candidates = torch.cat([extra_candidates, 
+                                          (x if self.vql.decay == 1 else x_recon)[:, 8:, :][:, :min(K, 8)]],
+                                         dim = 1)
+
+        
         else:
             extra_candidates = torch.empty(b, 0, 16, self.low_dim, device=x.device)
             
         
-        noise_y = max(noise_x - 1, 1)
+        noise_y = self.noise_y #max(noise_x - 1, 1)
         
-        if self.is_dou: recon_up = self.decoder_up(x_recon.detach() + torch.randn_like(x_recon)*noise_y if self.training else x_recon)
-        
-        
-        recon_down =             self.decoder_down(x_recon.detach() + torch.randn_like(x_recon)*noise_y if self.training else x_recon)# + torch.randn_like(x_recon)*2
+        if self.is_dou:
 
-        
-        
-        x_replace = self.random_replace(x = x_recon.detach().reshape(-1, self.w, self.low_dim),
-                                        x_code =  x.reshape(-1, self.w, self.low_dim)
-                                       )[0].reshape(b, n, self.w, self.low_dim)
+            recon_up = torch.empty_like(recon_continue_up)
 
-        if self.is_dou: recon_replace_up = self.decoder_up(x_replace + torch.randn_like(x_replace)*noise_y if self.training else x_recon)
-        
-        
-        recon_replace_down =             self.decoder_down(x_replace + torch.randn_like(x_replace)*noise_y if self.training else x_recon)
+            recon_replace_up = torch.empty_like(recon_continue_bias_up)
 
-        
-                                      
+        recon_down = torch.empty_like(recon_continue_down)
 
-        x = torch.cat([x, extra_candidates], dim = 1)
+        recon_replace_down = torch.empty_like(recon_continue_bias_down)
+        
+        if self.is_dou and self.s_x != 0: recon_up =   self.decoder_up(x_recon.detach() + torch.randn_like(x_recon)*(noise_v if self.noise_pattern else noise_y) if self.training else x_recon)
+        
+        
+        if self.s_x != 0:                 recon_down = self.decoder_down(x_recon.detach() + torch.randn_like(x_recon)*(noise_v if self.noise_pattern else noise_y) if self.training else x_recon)
 
 
+        if self.is_dou and self.s_x != 0: recon_replace_up =   self.decoder_up(x_replace + torch.randn_like(x_replace)*(noise_v if self.noise_pattern else noise_y) if self.training else x_recon)
+        
+        
+        if self.s_x != 0:                 recon_replace_down = self.decoder_down(x_replace + torch.randn_like(x_replace)*(noise_v if self.noise_pattern else noise_y) if self.training else x_recon)
+
+        
+        x = torch.cat([x, extra_candidates + (torch.randn_like(extra_candidates)*self.reasoning_noise if self.training else 0)], dim = 1)
+
+
+
+        if self.j_mean == False: x = x + self.j_position[None, None]
+        
  
         x = self.recat(x)
         
-        x = self.g_function(x + torch.randn_like(x) if self.training else x)
+        x = self.g_function(x)# + torch.randn_like(x) if self.training else x) #
 
         qkv = self.graph_clip(self.recombine(x))
         
         qkv = qkv.chunk(self.num_rule, dim = -2)
-        
+
 
         
-        out =  map(lambda t: self.tajador(self.forward_cross_attention(t.squeeze(-2))), qkv)
+        if self.j_mean:
 
-        y = torch.randn(1,1).to(x.device)
-
+        
+            out =  map(lambda t: self.tajador(self.forward_cross_attention(t.squeeze(-2))).reshape(b, -1, self.w).mean(dim = -1), qkv)
+            
+        else:
+            
+            out =  map(lambda t: self.tajador(self.forward_cross_attention(t.squeeze(-2))).reshape(b, -1, self.w), qkv)
+        
+        y = 0 
         
         if self.is_dou:
 
-            return *list(map(lambda t: t.mean(dim = 1).squeeze(), qkv)), x.reshape(-1, self.low_dim), \
-                sum(list(out)), y, bias.reshape(-1, self.w, self.low_dim), state, \
+            return *list(map(lambda t: t.mean(dim = 1).squeeze(-2), qkv)), x.reshape(-1, self.low_dim), \
+                self.agg_out(out), y, bias.reshape(-1, self.w, self.low_dim), state, \
                      recon_up, recon_down,\
                              recon_continue_up, recon_continue_down,\
                                  recon_continue_bias_up, recon_continue_bias_down,\
-                                     recon_replace_up, recon_replace_down, vq_loss
+                                     recon_replace_up, recon_replace_down, vq_loss, norm
                                      
         else:
             
-            return *list(map(lambda t: t.mean(dim = 1).squeeze(), qkv)), x.reshape(-1, self.low_dim), \
-                sum(list(out)), y, bias.reshape(-1, self.w, self.low_dim), state, \
+            return *list(map(lambda t: t.mean(dim = 1).squeeze(-2), qkv)), x.reshape(-1, self.low_dim), \
+                self.agg_out(out), y, bias.reshape(-1, self.w, self.low_dim), state, \
                       recon_down,\
                               recon_continue_down,\
                                   recon_continue_bias_down,\
-                                      recon_replace_down, vq_loss
-
+                                      recon_replace_down, vq_loss, norm
+                                 
+        
+    #"""
+    def agg_out(self, out, select = None, agg='mean'):
+        """
+        对 map/iterable 结果按索引选择后聚合。
+        select: None -> 默认全部 rule (range(num_rule))
+                int  -> 单取该索引
+                list/tuple -> 多索引
+                slice    -> 切片
+        agg: 'mean' | 'sum'
+        """
+        out_list = list(out)
+        sel = [i for i in range(self.num_rule)] if select is None else select
+    
+        if isinstance(sel, int):
+            return out_list[sel]
+    
+        # 统一转成列表
+        if isinstance(sel, slice):
+            selected = out_list[sel]
+        elif isinstance(sel, (list, tuple)):
+            selected = [out_list[i] for i in sel]
+        else:
+            raise TypeError(f"select must be int/list/tuple/slice, got {type(sel)}")
+    
+        if len(selected) == 0:
+            raise ValueError("selected rule outputs is empty")
+    
+        if agg == 'sum':
+            return sum(selected)
+        elif agg == 'mean':
+            return sum(selected) / len(selected)
+        else:
+            raise ValueError(f"agg must be 'mean' or 'sum', got {agg}")
 
     def my_cov(self, z):
         n = z.shape[0]
@@ -809,11 +949,25 @@ class raven_clip(nn.Module):
     
         
     def loss_function_ce(self, x, idx):
-        
-
-
-        return self.dio_loss(x, idx), (x.argmax(dim = -1) == idx).float().sum() if self.training else (x[:, :8].argmax(dim = -1) == idx).float().sum()
-        
+        # x: [b, C, w]，idx: [b]
+        if x.dim() == 2:
+            # 兼容旧调用：[b, C]
+            return self.dio_loss(x, idx, delta=self.dio_delta), \
+                   (x.argmax(dim=-1) == idx).float().sum()
+    
+        b, C, w = x.shape
+    
+        # 关键：不要对 w 做 mean；把 w 并进 batch 维
+        logits = x.permute(0, 2, 1).reshape(b * w, C)      # [b*w, C]
+        target = idx[:, None].expand(b, w).reshape(b * w)  # [b*w]
+    
+        loss = self.dio_loss(logits, target, delta=self.dio_delta)
+    
+        pred = logits.argmax(dim=-1)
+        right = (pred == target).float().sum()/w  # 16 个 patch 的平均 choice accuracy
+        # 如果你后面要 count，就改成 .sum()
+    
+        return loss, right
     
     def loss_function_sl(self, *out, target):
         
@@ -826,7 +980,9 @@ class raven_clip(nn.Module):
         
         # print(graph.shape)
 
-        txt = out[1]
+        txt = out[1]# b t 7775 d
+        # print(txt.shape)
+
         
         loss_1 = 0
     
@@ -852,73 +1008,183 @@ class raven_clip(nn.Module):
 
         
         if self.is_dou:
-            x_shape, x_line, z, x, y, bias, state, \
+            x_shape, x_line, _, _, z, x, y, bias, state, \
                  recon_up, recon_down, \
                          recon_continue_up, recon_continue_down, \
                              recon_continue_bias_up, recon_continue_bias_down, \
-                                 recon_replace_up, recon_replace_down, vq_loss = out
+                                 recon_replace_up, recon_replace_down, vq_loss, norm = out
                             
         else:
-            x_shape, x_line, z, x, y, bias, state, \
+            x_shape, x_line, _, _, z, x, y, bias, state, \
                  recon_down, \
                      recon_continue_down, \
                              recon_continue_bias_down, \
-                                recon_replace_down, vq_loss = out
+                                recon_replace_down, vq_loss, norm = out
             
                        
-        idx_ = F.one_hot(idx, 8)[:,:,None,None]
+
         
-        x_shape = (x_shape[:,:8]*idx_).sum(dim = 1)
-        
-        x_line = (x_line[:,:8]*idx_).sum(dim = 1)
-        
- 
-        y = y.unsqueeze(1)
-        
-       
+
+      
 
         if self.is_dou:
             
-            loss_stright = F.mse_loss(recon_up + recon_down - .5, state) + \
+            loss_stright = (F.mse_loss(recon_up + recon_down - .5, state) if self.s_x !=0 else 0) + \
                     F.mse_loss(recon_continue_up + recon_continue_down - .5, state) + \
                         F.mse_loss(recon_continue_bias_up + recon_continue_bias_down - .5, state) + \
-                            F.mse_loss(recon_replace_up + recon_replace_down - .5, state)
+                            (F.mse_loss(recon_replace_up + recon_replace_down - .5, state) if self.s_x !=0 else 0)
             
     
-            loss =  F.mse_loss(recon_up, state) + F.mse_loss(recon_down, state) +\
+            loss =  (F.mse_loss(recon_up, state) + F.mse_loss(recon_down, state)  if self.s_x !=0 else 0) +\
                         F.mse_loss(recon_continue_up, state) + F.mse_loss(recon_continue_down, state) +\
                             F.mse_loss(recon_continue_bias_up, state) + F.mse_loss(recon_continue_bias_down, state) +\
-                                F.mse_loss(recon_replace_up, state) + F.mse_loss(recon_replace_down, state)
+                                (F.mse_loss(recon_replace_up, state) + F.mse_loss(recon_replace_down, state) if self.s_x !=0 else 0)
             
         else:
+            s_x = self.s_x
+            s_y = 1
             
-            loss_stright = F.mse_loss(recon_down, state) +\
-                        F.mse_loss(recon_continue_down, state) + F.mse_loss(recon_continue_bias_down, state) + \
-                            F.mse_loss(recon_replace_down, state) 
+            loss_stright = (s_x*F.mse_loss(recon_down, state) if self.s_x !=0 else 0) +\
+                        1*F.mse_loss(recon_continue_down, state) + s_y*F.mse_loss(recon_continue_bias_down, state) + \
+                            (s_x*F.mse_loss(recon_replace_down, state)  if self.s_x !=0 else 0)
             
     
             loss =  0
             
-        
+
+
         
         loss_3, right = self.loss_function_ce(x, idx)
 
-        loss_4 = self.my_cov(z)
+        loss_4 = self.my_cov(z) 
         
         samlpes = torch.randn_like(bias)
         
-    
-        
         loss_5 = F.mse_loss(bias,  samlpes)
 
+        
 
-        
-        
-        return  100*(loss + 100*loss_stright) + 30*loss_3 + 1*loss_4 + loss_5 + 666*vq_loss, loss_stright,  vq_loss, right
-       
+
+        norm_mean = norm.detach().mean()
+
+        if self.print_norm: print(norm_mean.data)
+
+        loss_norm = F.mse_loss(norm, torch.ones_like(norm)*self.norm_lower_bound) if self.toxic else 0
+
+        return         self.gen_extent*(loss + 1000*loss_stright)\
+                       + self.reasoning_extent*loss_3 + 1*loss_4 + self.bias_extent*loss_5 \
+                       + self.vq_extent*torch.relu(vq_loss - self.vq_lower_bound) + self.vq_extent_2*torch.relu(vq_loss - self.vq_lower_bound_2) \
+                       + (self.norm_extent*loss_norm if self.toxic else 0),\
+                       loss_stright, \
+                       vq_loss, \
+                       right
+
+
 ################################################################################################################################################################################################
         
     def recon_all(self, state, lambd = 0):
+        
+        b, n, h, w = state.shape
+ 
+        x = self.vit(state.view(b*n, 1, h, w))
+        
+        x, bias = x.chunk(2, dim = -1)
+        
+        x, _, _ = self.vql(x)
+        
+        x = x.reshape(b, n, self.w, self.low_dim)
+        
+        bias = bias.reshape(b, n, self.w, self.low_dim)
+        
+        x = x + torch.randn_like(x)*lambd + bias
+   
+        x_recon = self.decoder_up(x + bias) + self.decoder_down(x + bias) - 0.5
+
+    
+        return x_recon.reshape(b, n, h, w)
+    
+    
+    def recon_randn_all(self, state, lambd = 1):
+        
+        b, n, h, w = state.shape
+ 
+        x = self.vit(state.view(b*n, 1, h, w))
+        
+        x, bias = x.chunk(2, dim = -1)
+        
+        x, _, _ = self.vql(x)
+        
+        x = x.reshape(b, n, self.w, self.low_dim)
+        
+        bias = bias.reshape(b, n, self.w, self.low_dim)
+        
+        x = x + torch.randn_like(x)*lambd
+        
+        x_recon = self.decoder_up(x) + self.decoder_down(x) - 0.5
+
+    
+        return x_recon.reshape(b, n, h, w)
+
+
+
+    def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
+        """
+        Gumbel-Softmax + NLLLoss
+        
+        Args:
+            logits: [B, C] 原始 logits
+            target: [B] 类别索引
+            temperature: Gumbel 温度
+        
+        Returns:
+            loss: 标量
+        """
+        # Gumbel 噪声
+        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
+        
+        # Gumbel-Softmax 对数概率
+        log_probs = F.log_softmax((logits + gumbel_noise) / temperature, dim=1)
+        
+        # NLLLoss
+        return F.nll_loss(log_probs, target, reduction= reduction)
+
+
+
+
+
+    def dio_loss(self, logits, target, delta= None, gumbeling = False ):
+        """
+        纯 CE 思路实现 DIO 损失
+        公式: CE + log( (1 - P_a + delta * P_a) / delta )
+        logits : (B, 8)   9-16 号候选 logits
+        target : (B,)     0-7 内的 gt 偏移
+        delta  : 正例系数倒数 = 1/delta
+        """
+       
+        if delta == None: delta = self.dio_delta
+
+        if gumbeling:
+            ce = self.gumbel_nll_loss(logits, target, reduction='none') 
+            p = F.gumbel_softmax(logits, dim=-1)
+            
+        else:
+            ce = F.cross_entropy(logits, target, reduction='none') 
+            p = F.softmax(logits, dim=-1)
+    
+      
+        
+        if delta<1:
+            p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
+        
+
+            corr = torch.log((1 - p_alpha + delta * p_alpha) / delta)
+            
+        else:
+            corr = 0
+    
+        return (ce + corr).mean()
+    
+    def recon_randn_replace(self, state, lambd = 0):
         
         b, n, h, w = state.shape
 
@@ -930,80 +1196,20 @@ class raven_clip(nn.Module):
         
         x, _, _ = self.vql(x)
         
+        x, _ = self.random_replace(x = x, max_replace=self.max_replace)
+        
         # print(x.shape)
         x = x.reshape(b, n, self.w, self.low_dim)
         
         bias = bias.reshape(b, n, self.w, self.low_dim)
         
-        
-        x = x + torch.randn_like(x)*lambd + bias
-        
-        
-        
-        x_recon = self.decoder_up(x + bias) + self.decoder_down(x + bias) - 0.5
-        # x_recon = self.decoder(x)
-    
-        return x_recon.reshape(b, n, h, w)
-    
-    
-    def recon_randn_all(self, state, lambd = 1):
-        
-        b, n, h, w = state.shape
 
- 
-        x = self.vit(state.view(b*n, 1, h, w))
-        
-        x, bias = x.chunk(2, dim = -1)
-        
-        x, _, _ = self.vql(x)
-
-        x = x.reshape(b, n, self.w, self.low_dim)
-        
-        bias = bias.reshape(b, n, self.w, self.low_dim)
-        
         x = x + torch.randn_like(x)*lambd
         
-        x_recon = self.decoder_up(x) + self.decoder_down(x) - 0.5  if self.is_dou else self.decoder_down(x)
-        
+        x_recon = self.decoder_up(x) + self.decoder_down(x) - 0.5
+
+    
         return x_recon.reshape(b, n, h, w)
-
-
-
-    def gumbel_nll_loss(self, logits, target, temperature=1.0, reduction='none'):
-        
-        # Gumbel 
-        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-10, 1 - 1e-10)))
-        
-        # Gumbel-Softmax 
-        log_probs = F.log_softmax((logits + gumbel_noise) / temperature, dim=1)
-        
-        # NLLLoss
-        return F.nll_loss(log_probs, target, reduction= reduction)
-
-
-
-
-
-    def dio_loss(self, logits, target, delta= 1, gumbeling = False ):
-        
-        if gumbeling:
-            ce = self.gumbel_nll_loss(logits, target, reduction='none') 
-            p = F.gumbel_softmax(logits, dim=-1)
-            
-        else:
-            ce = F.cross_entropy(logits, target, reduction='none') 
-            p = F.softmax(logits, dim=-1)
-        
-        if delta<1:
-            p_alpha = p.gather(1, target.unsqueeze(1)).squeeze(1)  # (B,)
-        
-            corr = torch.log((1 - p_alpha + delta * p_alpha) / delta)
-            
-        else:
-            corr = 0
-    
-        return (ce + corr).mean()#, (logits.argmax(dim = -1) == target).float().sum()
-    
         
     def random_replace(self, x, x_code = None, min_replace=1, max_replace=9):
         b, s, d = x.shape
@@ -1013,108 +1219,148 @@ class raven_clip(nn.Module):
         if x_code is None:
             x_code = self.sample_from_codebook_topk(b, 1).reshape(b, s, d).detach()
         
-        # 每个batch独立随机替换个数
+
         count = torch.randint(min_replace, max_replace + 1, (b,), device=device)
         
 
         ranks = torch.rand(b, s, device=device).argsort(dim=1).argsort(dim=1)
         
-  
+
         mask = (ranks < count.unsqueeze(1)).unsqueeze(-1).expand(-1, -1, d)
+        
 
         
-        return torch.where(mask, x_code, x), (count.sum()/(b*s)).item()
-    
-    
-    def sample_from_codebook(self, b, k = None):
-        
-        with torch.no_grad():
-            embed = self.vql.embed  # [H, D, N]
-            H, D, N = embed.shape
-            if k is None:
-                k = self.num_aux_candidates  # 采样数K
-            w = self.w  # patch数量(16)
+        return torch.where(mask, x_code, x), count
 
-            rand_idx = torch.randint(
-                0, N, 
-                (b, k, w, H), 
-                device=embed.device
-            )
-            
-            embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
-            
-            head_offsets = torch.arange(H, device=embed.device).view(1, 1, 1, H) * N
-            global_idx = rand_idx + head_offsets  # [b, k, w, H]
-            
-            samples = F.embedding(global_idx, embed_flat)
-            
-            samples = samples.reshape(b, k, w, H * D)
-            
-        return samples.detach()  # [b, k, w, low_dim]
-    
-    def sample_from_codebook_topk(self, b, k=None, top_k=None, strategy='hard', temperature=1.0, perturb_scale = .1):
+    def add_noise_to_patch(self, x, min_noise=1, max_noise=8, noise_scale=5, zero_padding_p = 0.3):
+        b, s, d = x.shape
+        device = x.device
+        
+
+        count = torch.randint(min_noise, max_noise + 1, (b,), device=device)
+        
+        zero_padding = (torch.rand(b, device=device) > zero_padding_p).float()
+        
+        count = count * zero_padding
+        
+
+        rand = torch.rand(b, s, device=device)
+        ranks = rand.argsort(dim=1).argsort(dim=1)  # 排名
+        
+
+        mask = ranks < count.unsqueeze(1)
+        
        
+        noise = torch.randn_like(x) * noise_scale
+        return torch.where(mask.unsqueeze(-1).expand(-1, -1, d), (x + noise).data, x)
+    
+    
+    def sample_from_codebook(self, b, k=None):
+
         with torch.no_grad():
-            embed = self.vql.embed  # [H, D, N]
-            H, D, N = embed.shape
+            embed = self.vql.embed
+            is_pos = embed.dim() == 4
+    
+            if is_pos:
+                P, H, D, N = embed.shape
+            else:
+                H, D, N = embed.shape
+    
             if k is None:
                 k = self.num_aux_candidates
-            w = self.w  # 16个位置
-            
+            w = self.w
+    
+            if is_pos:
+                assert P == w, f"codebook positions {P} != w {w}"
+                # 按 (pos, head, code) 打平: [P, H, D, N] -> [P*H*N, D]
+                embed_flat = embed.permute(0, 1, 3, 2).reshape(P * H * N, D)
+            else:
+                # 按 (head, code) 打平: [H, D, N] -> [H*N, D]
+                embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
+    
+            rand_idx = torch.randint(0, N, (b, k, w, H), device=embed.device)
+    
+            head_offsets = torch.arange(H, device=embed.device).view(1, 1, 1, H) * N
+    
+            if is_pos:
+                pos_offsets = torch.arange(P, device=embed.device).view(1, 1, P, 1) * (H * N)
+                global_idx = rand_idx + head_offsets + pos_offsets   # [b, k, w, H]
+            else:
+                global_idx = rand_idx + head_offsets                 # [b, k, w, H]
+    
+            samples = F.embedding(global_idx, embed_flat)            # [b, k, w, H, D]
+            samples = samples.reshape(b, k, w, H * D)
+    
+        return samples.detach()
+    
+    
+    def sample_from_codebook_topk(self, b, k=None, top_k=None, strategy='hard',
+                                  temperature=1.0, perturb_scale=.1):
+
+        with torch.no_grad():
+            embed = self.vql.embed
+            is_pos = embed.dim() == 4
+    
+            if is_pos:
+                P, H, D, N = embed.shape
+            else:
+                H, D, N = embed.shape
+    
+            if k is None:
+                k = self.num_aux_candidates
+            w = self.w
+    
+            if is_pos:
+                assert P == w, f"codebook positions {P} != w {w}"
+    
             if top_k is None:
-                top_k= int(N/self.w)
-            
-            # 检查聚类表是否可用
+                top_k = int(N * 0.55)
+    
+            # 聚类表未就绪时回退到均匀随机采样（内部已兼容两种版本）
             if not self.vql.map_sealed and self.vql.sample_count < 10000:
                 print(f"[Warning] Cluster map not ready ({self.vql.sample_count}), fallback to random")
                 return self.sample_from_codebook(b, k)
-            
-           
-            cluster_map = self.vql.get_cluster_map(normalize=False)  # [H, w, N]
-            
+    
+            # cluster_map: [H, w, N]，两版本一致
+            cluster_map = self.vql.get_cluster_map(normalize=False)
+    
+            head_offsets = torch.arange(H, device=embed.device).view(1, 1, H) * N
+    
             samples_list = []
-                       
-            for pos in range(w):  
-                pos_usage = cluster_map[:, pos, :]  # [H, N]
-                
+    
+            for pos in range(w):
+                # 该位置在所有头上的使用频次 [H, N]
+                pos_usage = cluster_map[:, pos, :]
+    
                 if strategy == 'hard':
-                   
-                    _, topk_indices = torch.topk(pos_usage, top_k, dim=-1)  # [H, top_k]
-                    
-                   
+                    # === 硬Top-K：只从高频码本中均匀选择 ===
+                    _, topk_indices = torch.topk(pos_usage, top_k, dim=-1)      # [H, top_k]
                     rand_in_topk = torch.randint(0, top_k, (b, k, H), device=embed.device)
                     selected_indices = torch.gather(
-                        topk_indices.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1), 
-                        -1, 
+                        topk_indices.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1),
+                        -1,
                         rand_in_topk.unsqueeze(-1)
-                    ).squeeze(-1)  # [b, k, H]
-                    
+                    ).squeeze(-1)                                            # [b, k, H]
+    
                 elif strategy == 'soft':
-                   
-                    values, indices = torch.topk(pos_usage, top_k, dim=-1)  # [H, top_k]
-                    
-                    
-                    probs = F.softmax(values / temperature, dim=-1)  # [H, top_k]
-                    
-                  
+                    # === 软Top-K：按频率加权多项式采样 ===
+                    values, indices = torch.topk(pos_usage, top_k, dim=-1)     # [H, top_k]
+                    probs = F.softmax(values / temperature, dim=-1)            # [H, top_k]
                     selected_in_topk = torch.multinomial(
                         probs.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1).reshape(-1, top_k),
                         num_samples=1,
                         replacement=True
-                    ).reshape(b, k, H)  # [b, k, H] 这是在top_k内的索引
-                    
-                   
+                    ).reshape(b, k, H)                                       # top_k 内的索引
                     selected_indices = torch.gather(
                         indices.unsqueeze(0).unsqueeze(1).expand(b, k, -1, -1),
                         -1,
                         selected_in_topk.unsqueeze(-1)
-                    ).squeeze(-1)  # [b, k, H]
-                    
+                    ).squeeze(-1)                                            # [b, k, H]
+    
                 elif strategy == 'mix':
-                    
+                    # === 混合策略：80% 高频 + 20% 随机探索 ===
                     mix_mask = torch.rand(b, k, H, device=embed.device) < 0.8
-                    
-                  
+    
                     _, topk_indices = torch.topk(pos_usage, top_k, dim=-1)
                     rand_in_topk = torch.randint(0, top_k, (b, k, H), device=embed.device)
                     hard_samples = torch.gather(
@@ -1122,28 +1368,31 @@ class raven_clip(nn.Module):
                         -1,
                         rand_in_topk.unsqueeze(-1)
                     ).squeeze(-1)
-                    
-                 
+    
                     random_samples = torch.randint(0, N, (b, k, H), device=embed.device)
-                    
+    
                     selected_indices = torch.where(mix_mask, hard_samples, random_samples)
-                
+    
                 else:
                     raise ValueError(f"Unknown strategy: {strategy}")
-                
-                # 查表获取嵌入 [b, k, H, D]
-                head_offsets = torch.arange(H, device=embed.device).view(1, 1, H) * N
-                global_idx = selected_indices + head_offsets  # [b, k, H]
-                
-                embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
-                pos_samples = F.embedding(global_idx.reshape(-1), embed_flat).reshape(b, k, H, D)
+    
+                global_idx = selected_indices + head_offsets               # [b, k, H]
+    
+                # ✅ 关键分支：position 版按位置取自己的码本，老版用全局码本
+                if is_pos:
+                    pos_embed_flat = embed[pos].permute(0, 2, 1).reshape(H * N, D)   # embed[pos]: [H, D, N]
+                else:
+                    pos_embed_flat = embed.permute(0, 2, 1).reshape(H * N, D)
+    
+                pos_samples = F.embedding(global_idx.reshape(-1), pos_embed_flat).reshape(b, k, H, D)
                 samples_list.append(pos_samples)
-            
-            # b, k, w, H, D] -> [b, k, w, H*D]
-            samples = torch.stack(samples_list, dim=2)  # [b, k, w, H, D]
-            samples = samples.reshape(b, k, w, H * D)
-            
+    
+            # 合并所有位置: [b, k, w, H, D] -> [b, k, w, H*D]
+            samples = torch.stack(samples_list, dim=2).reshape(b, k, w, H * D)
+    
             return samples.detach()
+    
+
        
 
         
@@ -1165,23 +1414,22 @@ def normalize(*xs):
         
         
 def reasoning(*args):
-	return raven_clip()
+  return raven_clip()
+
+
+
 
  
 if __name__ == '__main__':
     #from torchsummary import summary
     
-    x = torch.randn(2,16,80,80)
-    y = torch.randint(1,(2,7776,16)).long()
-    target = torch.randint(7776,(2,)).long()
-    label = torch.randint(8,(2,)).long()
+    num_item = 1
+    x = torch.randn(num_item,16,80,80)
+    y = torch.randint(1,(num_item,7776,16)).long()
+    target = torch.randint(7776,(num_item,)).long()
+    label = torch.randint(8,(num_item,)).long()
     
     model = raven_clip()
-    
-    model.eval()
-
-    torch.save(model.state_dict()  , './model_'+model.name+'_now.pt')
-    
 
     out = model(x)
     
@@ -1190,9 +1438,26 @@ if __name__ == '__main__':
 
     print(model)
     from torchinfo import summary
-    
-    summary(model, input_size=(2, 16, 80, 80),
+
+    summary(model.cuda(), input_size=(1, 16, 80, 80),
         col_names=["input_size", "output_size", "num_params", 
                     "kernel_size", "mult_adds", "trainable"], device='cpu')
+    #accuracy = model.choose_accuracy(*out, idx = label)
+    from torch.utils.benchmark import Timer
+    stmt = "model(input_tensor)"
+    setup = "model.eval(); torch.cuda.synchronize()"
+    model = raven_clip(num_aux_candidates = 0)
+    device = torch.device("cuda")
+    #device = torch.device("cpu")
+    timer = Timer(
+        stmt=stmt,
+        setup=setup,
+        globals={"model": model.cuda(), "input_tensor": x.cuda()},
+        num_threads=4,
+        label="Latency",
+        sub_label="batch=1"
+    )
     
-    
+    result = timer.blocked_autorange(min_run_time=20)  # 至少跑10秒
+    print(f"{result.median*1000:.3f} ms ± {result.iqr*1000:.3f} ms")
+

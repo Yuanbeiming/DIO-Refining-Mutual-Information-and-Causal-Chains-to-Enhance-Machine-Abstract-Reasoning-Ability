@@ -447,7 +447,7 @@ class raven_clip(nn.Module):
 
         self.vql_heads = vql_heads = 2
 
-        self.name = 'DIO_WORLD_'+ ('sn_' if self.if_sn else '_') + 'toxic_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads) + '_candidates_' +str(num_aux_candidates)
+        self.name = 'DIO_WORLD_'+ ('sn_' if self.if_sn else '_') + 'embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads) + '_candidates_' +str(num_aux_candidates)
 
         if self.is_dou: self.name = self.name + '_double_decoder'
 
@@ -588,7 +588,8 @@ class raven_clip(nn.Module):
 
         self.is_gumbel_vql = False
         gumbel_tau = 5.0
-        init_length = 12
+        init_length = (self.low_dim/vql_heads)**0.5
+        #init_length = init_length*1.5
         self.vql = VectorQuantizerEMA_multi_head_revival_with_recored(n_embed = self.num_embeddings,
                                               dim = self.low_dim,
                                               num_head = vql_heads,

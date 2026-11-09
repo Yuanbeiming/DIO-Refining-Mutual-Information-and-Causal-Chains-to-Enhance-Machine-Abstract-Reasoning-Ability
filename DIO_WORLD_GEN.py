@@ -585,7 +585,8 @@ class raven_clip(nn.Module):
         init_length = (self.low_dim/vql_heads)**0.5
         unit = 1.0
         init_length = init_length*unit
-        self.name = 'DIO_WORLD_'+ ('sn_' if self.if_sn else '_') + 'toxic_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads) + '_candidates_' +str(num_aux_candidates) + '_norm_' + str(unit).replace('.'
+        self.name = 'DIO_WORLD_'+ ('sn_' if self.if_sn else '_') + 'embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads) + '_candidates_' +str(num_aux_candidates) + '_norm_' + str(unit).replace('.', '_')
+		
         self.vql = VectorQuantizerEMA_multi_head_revival_with_recored(n_embed = self.num_embeddings,
                                               dim = self.low_dim,
                                               num_head = vql_heads,

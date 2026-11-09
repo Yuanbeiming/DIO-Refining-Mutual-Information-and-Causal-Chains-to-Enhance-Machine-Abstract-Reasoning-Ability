@@ -348,7 +348,7 @@ class To_image_cnn(nn.Module):
    
 
 class raven_clip(nn.Module):
-    def __init__(self, *args, num_aux_candidates = 8):
+    def __init__(self, *args, num_aux_candidates = 16):
         super(raven_clip,self).__init__()
 
         
@@ -445,10 +445,6 @@ class raven_clip(nn.Module):
         self.is_dou = False 
         self.if_sn = True
 
-        self.vql_heads = vql_heads = 2
-
-        self.name = 'DIO_WORLD_'+ ('sn_' if self.if_sn else '_') + 'embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads) + '_candidates_' +str(num_aux_candidates)
-
         if self.is_dou: self.name = self.name + '_double_decoder'
 
         if is_cnn: self.name = self.name + '_add_CNN'
@@ -473,10 +469,7 @@ class raven_clip(nn.Module):
         
 
         )#b*16, 16, dimS
-        
-        
-
-
+      
         num_decoder_depth = num_depth*2+1
           
         if self.is_dou:
@@ -546,8 +539,6 @@ class raven_clip(nn.Module):
             Rearrange('(b s m) d -> b s m d', s = self.w, m = m),
 
             
-
-            
         )
         
 
@@ -586,10 +577,15 @@ class raven_clip(nn.Module):
                             )
         
 
-        self.is_gumbel_vql = False
+        self.is_gumbel_vql = False# if is_cnn else True
         gumbel_tau = 5.0
+
+        self.vql_heads = vql_heads = 4
+        
         init_length = (self.low_dim/vql_heads)**0.5
-        #init_length = init_length*1.5
+        unit = 1.0
+        init_length = init_length*unit
+        self.name = 'DIO_WORLD_'+ ('sn_' if self.if_sn else '_') + 'toxic_embdv'+str(self.num_embeddings)+ '_heads_' +str(vql_heads) + '_candidates_' +str(num_aux_candidates) + '_norm_' + str(unit).replace('.'
         self.vql = VectorQuantizerEMA_multi_head_revival_with_recored(n_embed = self.num_embeddings,
                                               dim = self.low_dim,
                                               num_head = vql_heads,
